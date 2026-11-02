@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+<module fileurl="file://$PROJECT_DIR$/packages/kyber/melos_kyber.iml" filepath="$PROJECT_DIR$/packages/kyber/melos_kyber.iml"/>
+<module fileurl="file://$PROJECT_DIR$/packages/kyber_collection/melos_kyber_collection.iml" filepath="$PROJECT_DIR$/packages/kyber_collection/melos_kyber_collection.iml"/>
+<module fileurl="file://$PROJECT_DIR$/launcher/melos_kyber_launcher.iml" filepath="$PROJECT_DIR$/launcher/melos_kyber_launcher.iml"/>
+<module fileurl="file://$PROJECT_DIR$/packages/nexus_bridge/melos_nexus_bridge.iml" filepath="$PROJECT_DIR$/packages/nexus_bridge/melos_nexus_bridge.iml"/>
+<module fileurl="file://$PROJECT_DIR$/packages/nexus_gql/melos_nexus_gql.iml" filepath="$PROJECT_DIR$/packages/nexus_gql/melos_nexus_gql.iml"/>
+<module fileurl="file://$PROJECT_DIR$/melos_kyber_mono.iml" filepath="$PROJECT_DIR$/melos_kyber_mono.iml"/>
+    </modules>
+  </component>
+</project>
