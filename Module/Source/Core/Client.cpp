@@ -9,6 +9,7 @@
 #include <SDK/TypeInfo.h>
 #include <SDK/SDK.h>
 #include <SDK/Funcs.h>
+#include <Misc/ReinforcementLimits.h>
 
 #include <optional>
 
@@ -155,6 +156,9 @@ __int64 ClientStateChangeHk(__int64 inst, ClientState currentClientState, Client
     if (currentClientState == ClientState_Startup)
     {
         static bool firstStartup = true;
+
+        // New client session: drop stale GCR1 counts from a prior match.
+        ReinforcementLimits::Clear();
 
         // g_program->m_console->UnregisterCommands();
         g_program->m_allowInteraction = false;

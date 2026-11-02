@@ -7,6 +7,9 @@
 #include <Hook/HookManager.h>
 #include <Core/Program.h>
 #include <Entity/KyberSettings.h>
+#include <Misc/ReinforcementLimits.h>
+
+#include <cstring>
 
 namespace Kyber
 {
@@ -169,6 +172,24 @@ void ChatSystemProcessAndSendChatMessageHk(
 void ChatSystemProcessIncomingMessageHk(ChatChannel channel, const char* message, OnlineId& senderOnlineId, LocalPlayerId localPlayerId)
 {
     static const auto trampoline = HookManager::Call(ChatSystemProcessIncomingMessageHk);
+
+    // Reinforcement-limit lines from the server plugin are consumed here and never shown in chat
+    if (message != nullptr && strncmp(message, "GCR1|", 5) == 0)
+    {
+        if (channel != ChatChannel_Admin)
+        {
+            static bool loggedWrongChannel = false;
+            if (!loggedWrongChannel)
+            {
+                loggedWrongChannel = true;
+                KYBER_LOG(Warning, "[ReinforcementLimits] GCR1 on channel " << static_cast<int>(channel) << ", expected admin");
+            }
+        }
+        else if (ReinforcementLimits::ParseLine(message))
+        {
+            return;
+        }
+    }
 
     // Reverse channel switch done in ChatSystemProcessAndSendChatMessageHk so it displays properly
     if (channel == ChatChannel_Group)

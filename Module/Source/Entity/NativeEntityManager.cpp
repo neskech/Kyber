@@ -14,6 +14,7 @@
 #include <Utilities/PlatformUtils.h>
 #include <Core/Memory.h>
 #include <Script/LuaDataContainer.h>
+#include <Misc/ReinforcementText.h>
 
 #include <EASTL/fixed_map.h>
 
@@ -704,6 +705,13 @@ void EntityManager::OnEntityCreated(NativeEntity* entity)
 {
     if (entity->IsComponent())
     {
+        // Passive discovery only (GC_TEXT_DISCOVERY=1): log the entity type, never hook components.
+        if (ReinforcementText::DiscoveryEnabled())
+        {
+            const TypeInfo* componentType = entity->getType();
+            ReinforcementText::LogComponentCreated(
+                reinterpret_cast<uintptr_t>(entity), componentType != nullptr ? componentType->getName() : nullptr);
+        }
         return;
     }
 

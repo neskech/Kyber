@@ -7,6 +7,8 @@
 #include <Base/Logo.h>
 #include <Base/Version.h>
 #include <Core/DebugHooks.h>
+#include <Misc/ReinforcementText.h>
+#include <Misc/ReinforcementWidgets.h>
 #include <Core/Memory.h>
 #include <Core/Sentry.h>
 #include <Hook/HookManager.h>
@@ -487,6 +489,12 @@ void MessageManagerDispatchMessageHk(void* inst, Message* message)
     //    KYBER_LOG(Debug, "Server Player Firing: " << std::hex << message);
     //    KYBER_LOG(Debug, "BREAKME");
     //}
+    else if (name == "ClientMetricsPushUIScreenMessage")
+    {
+        // Widget discovery (GC_WIDGET_DISCOVERY=1): dump the screen-open message
+        ReinforcementWidgets::OnUIScreenMessage(name.c_str(), message);
+        ReinforcementText::NoteSpawnScreenOpened(); // GC_TEXT_DISCOVERY: opens the localization log window
+    }
     else if (name == "WSServerBattlepointsChangedMessage")
     {
         KYBER_LOG(Debug, "Server Battlepoints Changed: " << std::hex << message);
@@ -671,6 +679,17 @@ const char* GetLocalizedStringInternalHk(const char* inst, const char* id)
 {
     static const auto trampoline = HookManager::Call(GetLocalizedStringInternalHk);
     const char* res = trampoline(inst, id);
+
+    // Reinforcement labels (GC_TEXT_MODE=localizedId) serve their own text; discovery only logs.
+    if (ReinforcementText::WriterEnabled() || ReinforcementText::DiscoveryEnabled())
+    {
+        if (const char* custom = ReinforcementText::LookupLocalized(id))
+        {
+            return custom;
+        }
+        ReinforcementText::LogLocalization(id, res);
+    }
+
     if (res != nullptr && res[0] != '\0')
     {
         if (strcmp(res, "You've been kicked by Fairfight") == 0)

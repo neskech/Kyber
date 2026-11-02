@@ -30,6 +30,10 @@ class StartGameCommand extends Command<int> {
       ..addOption('raw-mods', help: 'Specify a list of mods to use', valueHelp: 'path/to/mod_file.json')
       ..addOption('collection-file', help: 'Specify the Mod Collection file to use', valueHelp: 'path/to/collection.kmodcollection')
       ..addOption('server-id', help: 'Specify the server id to connect to')
+      ..addOption('host-name', help: 'Host a listen server with this name instead of joining')
+      ..addOption('host-map', help: 'Map for --host-name')
+      ..addOption('host-mode', help: 'Mode for --host-name')
+      ..addOption('host-max-players', help: 'Max players for --host-name', defaultsTo: '40')
       ..addOption('proxy-id', help: 'Specify the proxy id to use')
       ..addOption('token', abbr: 't')
       ..addOption('game-path', help: 'Specify the game path')
@@ -223,12 +227,59 @@ class StartGameCommand extends Command<int> {
       ..registerSingleton<LevelDeclarationService>(LevelDeclarationService())
       ..get<LevelDeclarationService>().set(modEntries);
 
+    final hostName = argResults?['host-name'] as String?;
+    StartServerRequest? startServer;
+    if (hostName != null && hostName.isNotEmpty) {
+      if (joinServerByIP != null) {
+        _logger.err('host-name and server-id cannot both be set');
+        return ExitCode.usage.code;
+      }
+      final hostMap = argResults?['host-map'] as String?;
+      final hostMode = argResults?['host-mode'] as String?;
+      if (hostMap == null || hostMap.isEmpty || hostMode == null || hostMode.isEmpty) {
+        _logger.err('host-map and host-mode are required with host-name');
+        return ExitCode.usage.code;
+      }
+      final maxPlayers = int.tryParse(argResults?['host-max-players'] as String? ?? '') ?? 40;
+      // Password stays in KYBER_SERVER_PASSWORD. An empty init hooks the menu and the game dies.
+      // Bot fill is not a startup command. Those run before the mode exists and do not spawn anyone.
+      startServer = StartServerRequest(
+        name: hostName,
+        password: Platform.environment['KYBER_SERVER_PASSWORD'] ?? '',
+        description: '',
+        maxPlayers: maxPlayers,
+        mapRotation: [LevelSetup(map: hostMap, mode: hostMode)],
+      );
+    }
+
     final grpcServer = KyberGRPCServer();
     await grpcServer.start();
-    grpcServer.setInitializeRequest(InitializeRequest(joinServer: joinServerByIP, modData: modData));
+    grpcServer.setInitializeRequest(InitializeRequest(
+      joinServer: joinServerByIP,
+      startServer: startServer,
+      modData: modData,
+      startupCommands: const [],
+    ));
 
     _logger.info('Kyber will listen on port $kyberPort');
     final pid = await startGame(gameSlug: 'star-wars-battlefront-2', gamePathOverride: argResults?['game-path'] as String?, gameArgs: []);
+
+    _logger.info('Waiting for Kyber (PID: $pid)');
+    final licensed = Completer<void>();
+    lsxGetEventStream(pid: pid).listen((event) {
+      if (event == 'RequestLicense' && !licensed.isCompleted) {
+        licensed.complete();
+      }
+    });
+    try {
+      await licensed.future.timeout(const Duration(seconds: 60));
+    } catch (e) {
+      _logger.warn('RequestLicense not observed: $e');
+    }
+
+    // Wrapper treats this line as ready. The process must stay alive after it
+    // so Maxima can keep answering LSX. Leaving here shows Origin's language error.
+    _logger.success('Kyber started');
 
     _logger.info('Injecting Kyber from ${FileHelper.getModuleDirectory().path}/Kyber.dll...');
     injectKyber(pid: pid, path: FileHelper.getModuleDirectory().path + "\\Kyber.dll");
@@ -236,32 +287,13 @@ class StartGameCommand extends Command<int> {
     sl.registerSingleton<MaximaGameInstance>(
       MaximaGameInstance(
         pid: pid,
-        isDedicated: true,
+        isDedicated: false,
         clientService: ClientGRPCService('', 0),
         mods: gameplayMods,
       ),
     );
 
-    _logger.info('Waiting for Kyber (PID: $pid)');
-    final completion = Completer<void>();
-    lsxGetEventStream(pid: pid).listen(
-      (event) async {
-        if (event != 'RequestLicense') {
-          return;
-        }
-
-        _logger.success('Kyber started');
-      },
-      onDone: completion.complete,
-      onError: completion.complete,
-    );
-
-    try {
-      await completion.future;
-    } catch (e) {
-      _logger.err('Error: $e');
-    }
-
+    await Completer<void>().future;
     return ExitCode.success.code;
   }
 }
