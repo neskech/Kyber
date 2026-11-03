@@ -59,10 +59,16 @@ void ServerPlayerSetUnlock(ServerPlayer* player, const Guid& guid, bool value)
 
     uint32_t unlockCount = GetUnlockCount();
     extent->InitUnlockArray(unlockCount);
+    int32_t signedIndex = ServerPersistenceUnlocksGetBitIndex(*reinterpret_cast<__int64*>(0x143ED4480), guid);
+    KYBER_LOG(Info, "[GCUnlock] SetUnlock guid=" << guid.ToString() << " index=" << signedIndex << " count=" << unlockCount << " value=" << value);
+    if (signedIndex < 0 || static_cast<uint32_t>(signedIndex) >= unlockCount)
+    {
+        return;
+    }
     FBBitArray* bitArray = new (FB_SERVER_ARENA) FBBitArray(unlockCount);
     memcpy(bitArray->m_bits, extent->m_unlockArray.m_bits, 4 * bitArray->m_dwordCount);
 
-    uint32_t index = ServerPersistenceUnlocksGetBitIndex(*reinterpret_cast<__int64*>(0x143ED4480), guid);
+    uint32_t index = static_cast<uint32_t>(signedIndex);
 
     uint32_t* bits = bitArray->m_bits;
     uint32_t elementIndex = index / 32;

@@ -12,6 +12,7 @@
 #include <Misc/ReflectDump.h>
 #include <Misc/ReinforcementLimits.h>
 #include <Misc/ReinforcementText.h>
+#include <Misc/UnlockCatalog.h>
 #include <SDK/Funcs.h>
 
 #include <algorithm>
@@ -98,6 +99,7 @@ const std::vector<uint32_t>& ResolveKitIds(const std::string& path)
         }
         return kNone;
     }
+    UnlockCatalog::Probe(kit, path);
     std::vector<uint32_t> ids{ kitId };
     uint32_t gameplayId = 0;
     DataContainer* gameplay = ReadPointerField(kit, kit->getType(), "Gameplay");
@@ -114,6 +116,7 @@ const std::vector<uint32_t>& ResolveKitIds(const std::string& path)
 // Rebuilds the depleted-kit set from the GCR1 store.
 void RefreshDepletion()
 {
+    UnlockCatalog::ProbeFromEnv();
     std::unordered_map<uint32_t, std::string> depleted;
     std::unordered_map<uint32_t, ReinforcementLimits::Entry> tracked;
     for (const ReinforcementLimits::Entry& entry : ReinforcementLimits::SnapshotAll())
