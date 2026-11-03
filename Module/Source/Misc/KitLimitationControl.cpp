@@ -8,6 +8,8 @@
 #include <Base/Log.h>
 #include <Core/DebugHooks.h>
 #include <Core/Program.h>
+#include <Misc/KitLimitationControl.h>
+#include <Misc/ReflectDump.h>
 #include <Misc/ReinforcementLimits.h>
 #include <Misc/ReinforcementText.h>
 #include <SDK/Funcs.h>
@@ -28,13 +30,12 @@ namespace Kyber
 {
 namespace
 {
+using namespace Reflect;
+
 // Empty stand-in so the wrapper has a typed data pointer.
 class KitLimitationEntityData : public DataContainer
 {};
 
-constexpr int kMaxSuperDepth = 16;    // Guard against cyclic superclass chains.
-constexpr int kMaxDumpDepth = 6;      // Nesting cap for reflected dumps.
-constexpr uint32_t kMaxArrayDump = 96; // Elements printed per array.
 constexpr int kMaxChangeLogs = 600;   // Property/event lines per process.
 
 std::recursive_mutex s_mutex;
@@ -48,263 +49,6 @@ bool Enabled()
         return value == nullptr || std::strcmp(value, "0") != 0;
     }();
     return enabled;
-}
-
-// Copies size bytes when the range is committed and readable.
-bool SafeRead(const void* ptr, void* out, size_t size)
-{
-    return ReinforcementText::SafeReadMemory(ptr, out, size);
-}
-
-// Printable CString at ptr, or a marker.
-std::string ReadCString(const char* ptr)
-{
-    if (ptr == nullptr)
-    {
-        return "<null>";
-    }
-    std::string text;
-    for (size_t i = 0; i < 200; i++)
-    {
-        char c = 0;
-        if (!SafeRead(ptr + i, &c, 1))
-        {
-            return text + "<unreadable>";
-        }
-        if (c == 0)
-        {
-            return text;
-        }
-        text += (static_cast<unsigned char>(c) < 32) ? '?' : c;
-    }
-    return text + "...";
-}
-
-// Type name of a TypeInfo, or "?".
-const char* TypeName(const TypeInfo* type)
-{
-    if (type == nullptr || type->typeInfoData == nullptr || type->typeInfoData->name == nullptr)
-    {
-        return "?";
-    }
-    return type->typeInfoData->name;
-}
-
-// Fields declared directly on a class or value type (not its superclasses).
-void DeclaredFields(const TypeInfo* type, const FieldInfoData*& fields, int& count)
-{
-    fields = nullptr;
-    count = 0;
-    if (type == nullptr || type->typeInfoData == nullptr)
-    {
-        return;
-    }
-    const TypeCodeEnum code = type->getBasicType();
-    if (code == kTypeCode_Class)
-    {
-        const ClassInfoData* info = reinterpret_cast<const ClassInfoData*>(type->typeInfoData);
-        fields = info->fields;
-        count = info->fieldCount;
-    }
-    else if (code == kTypeCode_ValueType)
-    {
-        const ValueTypeInfoData* info = reinterpret_cast<const ValueTypeInfoData*>(type->typeInfoData);
-        fields = info->fields;
-        count = info->fieldCount;
-    }
-}
-
-// Finds a field by name on a class (walking superclasses) or value type.
-const FieldInfoData* FindField(const TypeInfo* type, const char* name)
-{
-    for (int depth = 0; type != nullptr && depth < kMaxSuperDepth; depth++)
-    {
-        const FieldInfoData* fields = nullptr;
-        int count = 0;
-        DeclaredFields(type, fields, count);
-        for (int i = 0; fields != nullptr && i < count; i++)
-        {
-            if (fields[i].name != nullptr && _stricmp(fields[i].name, name) == 0)
-            {
-                return &fields[i];
-            }
-        }
-        if (type->getBasicType() != kTypeCode_Class)
-        {
-            return nullptr;
-        }
-        const ClassInfo* super = reinterpret_cast<const ClassInfoData*>(type->typeInfoData)->superClass;
-        const TypeInfo* next = reinterpret_cast<const TypeInfo*>(super);
-        if (next == type)
-        {
-            return nullptr;
-        }
-        type = next;
-    }
-    return nullptr;
-}
-
-// Reads a 32-bit field by name; false when missing or unreadable.
-bool ReadU32(const void* object, const TypeInfo* type, const char* name, uint32_t& out)
-{
-    const FieldInfoData* field = FindField(type, name);
-    return field != nullptr && SafeRead(static_cast<const uint8_t*>(object) + field->fieldOffset, &out, sizeof(out));
-}
-
-// Reads a Boolean field by name; false when missing or unreadable.
-bool ReadBool(const void* object, const TypeInfo* type, const char* name, bool& out)
-{
-    const FieldInfoData* field = FindField(type, name);
-    return field != nullptr && SafeRead(static_cast<const uint8_t*>(object) + field->fieldOffset, &out, sizeof(out));
-}
-
-// Element count and data pointer of an FBArray stored at slot.
-bool ReadArray(const void* slot, const uint8_t*& data, uint32_t& size)
-{
-    data = nullptr;
-    size = 0;
-    if (!SafeRead(slot, &data, sizeof(data)) || data == nullptr)
-    {
-        return false;
-    }
-    return SafeRead(data - sizeof(uint32_t), &size, sizeof(size));
-}
-
-std::string DumpValue(const uint8_t* p, const TypeInfo* type, int depth);
-
-// Dumps every field of a class (with superclasses) or value type at p.
-std::string DumpFields(const uint8_t* p, const TypeInfo* type, int depth)
-{
-    std::ostringstream out;
-    out << "{";
-    for (int level = 0; type != nullptr && level < kMaxSuperDepth; level++)
-    {
-        const FieldInfoData* fields = nullptr;
-        int count = 0;
-        DeclaredFields(type, fields, count);
-        for (int i = 0; fields != nullptr && i < count; i++)
-        {
-            out << " " << (fields[i].name != nullptr ? fields[i].name : "?") << "="
-                << DumpValue(p + fields[i].fieldOffset, fields[i].fieldTypePtr, depth + 1);
-        }
-        if (type->getBasicType() != kTypeCode_Class)
-        {
-            break;
-        }
-        const TypeInfo* next = reinterpret_cast<const TypeInfo*>(reinterpret_cast<const ClassInfoData*>(type->typeInfoData)->superClass);
-        if (next == type)
-        {
-            break;
-        }
-        type = next;
-    }
-    out << " }";
-    return out.str();
-}
-
-// Reflected value at p as text; nested types are expanded up to kMaxDumpDepth.
-std::string DumpValue(const uint8_t* p, const TypeInfo* type, int depth)
-{
-    if (type == nullptr || type->typeInfoData == nullptr)
-    {
-        return "<notype>";
-    }
-    if (depth > kMaxDumpDepth)
-    {
-        return "<deep>";
-    }
-    std::ostringstream out;
-    switch (type->getBasicType())
-    {
-    case kTypeCode_Boolean: {
-        bool v = false;
-        SafeRead(p, &v, 1);
-        return v ? "true" : "false";
-    }
-    case kTypeCode_Int8:
-    case kTypeCode_Uint8: {
-        uint8_t v = 0;
-        SafeRead(p, &v, 1);
-        return std::to_string(v);
-    }
-    case kTypeCode_Int16:
-    case kTypeCode_Uint16: {
-        uint16_t v = 0;
-        SafeRead(p, &v, 2);
-        return std::to_string(v);
-    }
-    case kTypeCode_Int32:
-    case kTypeCode_Uint32:
-    case kTypeCode_Enum: {
-        uint32_t v = 0;
-        SafeRead(p, &v, 4);
-        out << static_cast<int32_t>(v) << "(0x" << std::hex << v << ")";
-        return out.str();
-    }
-    case kTypeCode_Int64:
-    case kTypeCode_Uint64: {
-        uint64_t v = 0;
-        SafeRead(p, &v, 8);
-        out << "0x" << std::hex << v;
-        return out.str();
-    }
-    case kTypeCode_Float32: {
-        float v = 0;
-        SafeRead(p, &v, 4);
-        out << v;
-        return out.str();
-    }
-    case kTypeCode_CString: {
-        const char* s = nullptr;
-        SafeRead(p, &s, sizeof(s));
-        return "\"" + ReadCString(s) + "\"";
-    }
-    case kTypeCode_Class: {
-        const uint8_t* obj = nullptr;
-        SafeRead(p, &obj, sizeof(obj));
-        if (obj == nullptr)
-        {
-            return "null";
-        }
-        TypeInfo* objType = nullptr;
-        SafeRead(obj + sizeof(void*), &objType, sizeof(objType));
-        out << "<" << TypeName(objType) << " @" << std::hex << reinterpret_cast<uintptr_t>(obj) << std::dec;
-        uint32_t id = 0;
-        if (objType != nullptr && ReadU32(obj, objType, "CharacterKitId", id))
-        {
-            out << " CharacterKitId=0x" << std::hex << id << std::dec;
-        }
-        if (objType != nullptr && ReadU32(obj, objType, "CharacterId", id))
-        {
-            out << " CharacterId=0x" << std::hex << id << std::dec;
-        }
-        out << ">";
-        return out.str();
-    }
-    case kTypeCode_ValueType:
-        return DumpFields(p, type, depth);
-    case kTypeCode_Array: {
-        const TypeInfo* element = reinterpret_cast<const ArrayTypeInfoData*>(type->typeInfoData)->elementType;
-        const uint8_t* data = nullptr;
-        uint32_t size = 0;
-        if (!ReadArray(p, data, size) || element == nullptr || element->typeInfoData == nullptr)
-        {
-            return "[]";
-        }
-        const TypeCodeEnum code = element->getBasicType();
-        const size_t stride = (code == kTypeCode_Class || code == kTypeCode_CString) ? sizeof(void*) : element->typeInfoData->totalSize;
-        out << "[" << size << ":";
-        for (uint32_t i = 0; i < size && i < kMaxArrayDump; i++)
-        {
-            out << " #" << i << "=" << DumpValue(data + i * stride, element, depth + 1);
-        }
-        out << " ]";
-        return out.str();
-    }
-    default:
-        out << "<code" << static_cast<int>(type->getBasicType()) << ">";
-        return out.str();
-    }
 }
 
 // One KitLimitation row: the kit and the hashed input properties that drive it.
@@ -329,18 +73,6 @@ KitIdCache s_kitIds;
 std::unordered_map<uint32_t, std::string> s_depleted;
 // GCR1 entry of every tracked kit, keyed by Identifier.
 std::unordered_map<uint32_t, ReinforcementLimits::Entry> s_tracked;
-
-// Reads the pointer stored in a class field, or nullptr.
-DataContainer* ReadPointerField(const void* object, const TypeInfo* type, const char* name)
-{
-    const FieldInfoData* field = FindField(type, name);
-    DataContainer* out = nullptr;
-    if (field == nullptr || !SafeRead(static_cast<const uint8_t*>(object) + field->fieldOffset, &out, sizeof(out)))
-    {
-        return nullptr;
-    }
-    return out;
-}
 
 // Resolves a kit asset path to the ids a KitLimitation row may use (kit and Gameplay Identifier); empty while not loaded.
 const std::vector<uint32_t>& ResolveKitIds(const std::string& path)
@@ -837,4 +569,17 @@ bool RegisterKitLimitation()
 
 [[maybe_unused]] const bool s_kitLimitationRegistered = RegisterKitLimitation();
 } // namespace
+
+bool KitLimitationControl::CountFor(uint32_t kitId, int& cur, int& start)
+{
+    std::lock_guard<std::recursive_mutex> lock(s_mutex);
+    auto it = s_tracked.find(kitId);
+    if (it == s_tracked.end())
+    {
+        return false;
+    }
+    cur = it->second.cur;
+    start = it->second.start;
+    return true;
+}
 } // namespace Kyber
