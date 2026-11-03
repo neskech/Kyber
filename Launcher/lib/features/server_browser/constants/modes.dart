@@ -1,5 +1,7 @@
 const Set<(String, Object)> filterModes = {
   ('Supremacy', 'Mode1'),
+  ('Supremacy Ground', 'ModeGcGround'),
+  ('Supremacy Space', 'ModeGcSpace'),
   ('HvV', 'HeroesVersusVillains'),
   ('Galactic Assault', 'PlanetaryBattles'),
   ('CO-OP', ('ModeDefend', 'Mode9')),
