@@ -1,6 +1,6 @@
 // Copyright Armchair Developers / MagixGames. Licensed under GPLv3.
 
-// Native-entity wrappers for GC_TEXT_DISCOVERY logging and the GC_TEXT_FIELD test writer (off unless an env var is set).
+// Native-entity wrappers: bind cost rows to spawn cards, write cur/start, and disable depleted widgets.
 
 #define _WINSOCKAPI_
 #include <Entity/NativeEntityManager.h>
@@ -8,7 +8,9 @@
 #include <Base/Log.h>
 #include <Core/DebugHooks.h>
 #include <Core/Program.h>
+#include <Misc/ReinforcementLimits.h>
 #include <Misc/ReinforcementText.h>
+#include <Misc/ReinforcementWidgets.h>
 #include <SDK/Fb/UIIncubatorShared.h>
 #include <Utilities/StringUtils.h>
 
@@ -17,6 +19,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -34,6 +37,10 @@ class BattlepointUnitCostEntityData : public DataContainer
 class BattlepointHeroCostEntityData : public DataContainer
 {};
 class LocalizedStringCacheEntityData : public DataContainer
+{};
+class WSUIWidgetEntityData : public DataContainer
+{};
+class FBUIListItemWidgetEntityData : public DataContainer
 {};
 
 constexpr size_t kMaxStringProbe = 256;      // Max chars read when probing a possible string.
@@ -159,6 +166,40 @@ std::string DescribeValue(const PropertyModification* modification)
     return out.str();
 }
 
+// Type name and Asset.Name of a DataContainer-like pointer, empty when unreadable.
+std::string DescribeObject(const void* object)
+{
+    if (object == nullptr)
+    {
+        return "<null>";
+    }
+    std::ostringstream out;
+    out << std::hex << "obj=" << reinterpret_cast<uintptr_t>(object) << std::dec;
+    TypeInfo* type = nullptr;
+    decltype(type->typeInfoData) info = nullptr;
+    decltype(info->name) typeName = nullptr;
+    if (SafeRead(reinterpret_cast<const uint8_t*>(object) + sizeof(void*), &type, sizeof(type)) && type != nullptr &&
+        SafeRead(&type->typeInfoData, &info, sizeof(info)) && info != nullptr &&
+        SafeRead(&info->name, &typeName, sizeof(typeName)) && typeName != nullptr)
+    {
+        const std::string name = ReadCString(typeName);
+        if (!name.empty() && name[0] != '<')
+        {
+            out << " type=" << name;
+        }
+    }
+    void* namePtr = nullptr;
+    if (SafeRead(reinterpret_cast<const uint8_t*>(object) + 0x18, &namePtr, sizeof(namePtr)) && namePtr != nullptr)
+    {
+        const std::string name = ReadCString(namePtr);
+        if (!name.empty() && name[0] != '<')
+        {
+            out << " name=" << name;
+        }
+    }
+    return out.str();
+}
+
 // Reads one CString field as stored bytes and as a pointer, the same two probes used for property changes.
 std::string ReadStoredString(const DataContainer* data, uint16_t offset)
 {
@@ -172,6 +213,50 @@ std::string ReadStoredString(const DataContainer* data, uint16_t offset)
     std::string direct = ReadCString(slot);
     std::string indirect = derefOk ? ReadCString(viaPtr) : std::string("<unreadable>");
     return direct + "|" + indirect;
+}
+
+// Picks the real CString from ReadStoredString's "direct|indirect" pair.
+std::string PreferredString(const std::string& stored)
+{
+    const size_t pipe = stored.find('|');
+    const std::string direct = pipe == std::string::npos ? stored : stored.substr(0, pipe);
+    const std::string indirect = pipe == std::string::npos ? std::string() : stored.substr(pipe + 1);
+    const auto clean = [](const std::string& text) {
+        return text.empty() || text[0] == '<' ? std::string() : text;
+    };
+    const std::string viaPtr = clean(indirect);
+    return viaPtr.empty() ? clean(direct) : viaPtr;
+}
+
+bool VtableReadable(const void* object);
+
+// Reads bus and parent-bus addresses from an entity.
+void EntityBuses(const NativeEntity* entity, uintptr_t& bus, uintptr_t& parentBus)
+{
+    bus = 0;
+    parentBus = 0;
+    if (entity == nullptr || !VtableReadable(entity))
+    {
+        return;
+    }
+    EntityBus* entityBus = entity->GetEntityBus();
+    if (entityBus == nullptr || !VtableReadable(entityBus))
+    {
+        return;
+    }
+    bus = reinterpret_cast<uintptr_t>(entityBus);
+    EntityBus* parent = nullptr;
+    if (SafeRead(&entityBus->m_parentBus, &parent, sizeof(parent)) && parent != nullptr)
+    {
+        parentBus = reinterpret_cast<uintptr_t>(parent);
+    }
+}
+
+// Kit already registered on this bus or its parent.
+std::string KitOnBuses(uintptr_t bus, uintptr_t parentBus)
+{
+    std::string kit = ReinforcementText::KitForBus(bus);
+    return kit.empty() ? ReinforcementText::KitForBus(parentBus) : kit;
 }
 
 // True when the object's vtable slot is readable, so a virtual call is unlikely to jump into garbage.
@@ -260,6 +345,15 @@ public:
             m_names[StringUtils::HashQuick(field.name.c_str())] = field.name;
         }
         LogCreated();
+        LogGcDump("create");
+        ReinforcementText::RegisterDiscoveryPoll(Address(), DataTypeName(), [this]() { return SnapshotCStrings(); });
+    }
+
+    // Drops the poll row; derived classes that override must call this.
+    void OnDestroy() override
+    {
+        ReinforcementText::UnregisterDiscoveryPoll(Address());
+        KyberEntityBase::OnDestroy();
     }
 
     // Forwards to the original entity, then logs the change when enabled.
@@ -292,8 +386,159 @@ protected:
         return false;
     }
 
+    // First matching field name from the list, empty when none exist.
+    std::string FirstField(std::initializer_list<const char*> names) const
+    {
+        for (const char* name : names)
+        {
+            if (name != nullptr && HasField(name))
+            {
+                return name;
+            }
+        }
+        return std::string();
+    }
+
+    // LocalizedStringId::StringHash on this entity, 0 when missing.
+    int32_t ReadLocalizedHash() const
+    {
+        for (const FieldDesc& field : m_fields)
+        {
+            if (field.name != "LocalizedStringId")
+            {
+                continue;
+            }
+            void* ptr = nullptr;
+            if (!SafeRead(reinterpret_cast<const uint8_t*>(this->m_data) + field.offset, &ptr, sizeof(ptr)) || ptr == nullptr)
+            {
+                return 0;
+            }
+            int32_t hash = 0;
+            if (!SafeRead(static_cast<const uint8_t*>(ptr) + kLocalizedHashOffset, &hash, sizeof(hash)))
+            {
+                return 0;
+            }
+            return hash;
+        }
+        return 0;
+    }
+
+    // CString stored on a named field.
+    std::string FieldString(const std::string& name) const
+    {
+        for (const FieldDesc& field : m_fields)
+        {
+            if (field.name == name)
+            {
+                return PreferredString(ReadStoredString(this->m_data, field.offset));
+            }
+        }
+        return std::string();
+    }
+
+    // All CString fields plus Character/Hero/Text/name so poll and create share one dump.
+    std::string SnapshotCStrings() const
+    {
+        std::ostringstream values;
+        values << DescribeOwners(this->m_nativeEntity);
+        for (const FieldDesc& field : m_fields)
+        {
+            const bool named = field.name == "Character" || field.name == "Hero" || field.name == "Text" ||
+                               field.name == "InstanceName" || field.name == "Name";
+            if (field.typeName == "CString" || named)
+            {
+                values << " " << field.name << "(" << field.typeName << ")=\"" << ReadStoredString(this->m_data, field.offset) << "\"";
+            }
+        }
+        return values.str();
+    }
+
+    // True when a field may hold a settings id, loc id, asset name, or other per-card key.
+    static bool IsIdentifierField(const FieldDesc& field)
+    {
+        const std::string& n = field.name;
+        const std::string& t = field.typeName;
+        if (t == "CString" || t == "LocalizedStringId" || t == "ResourceRef")
+        {
+            return true;
+        }
+        if (t.find("String") != std::string::npos || t.find("Asset") != std::string::npos || t.find("Ref") != std::string::npos)
+        {
+            return true;
+        }
+        return n == "Text" || n == "LabelId" || n == "TextKey" || n == "Title" || n == "Name" || n == "Icon" || n == "Asset" ||
+               n == "Data" || n == "Character" || n == "Hero" || n == "InstanceName" || n == "LocalizedStringId";
+    }
+
+    // Identifier-like fields for [GCDump] (CString, loc id, ResourceRef, named keys).
+    std::string SnapshotDump() const
+    {
+        std::ostringstream values;
+        for (const FieldDesc& field : m_fields)
+        {
+            if (!IsIdentifierField(field))
+            {
+                continue;
+            }
+            const uint8_t* slot = reinterpret_cast<const uint8_t*>(this->m_data) + field.offset;
+            values << " " << field.name << "(" << field.typeName << ")=";
+            if (field.typeName == "CString" || field.name == "Text" || field.name == "Character" || field.name == "Hero" ||
+                field.name == "InstanceName" || field.name == "Name" || field.name == "LabelId" || field.name == "TextKey" ||
+                field.name == "Title")
+            {
+                values << "\"" << ReadStoredString(this->m_data, field.offset) << "\"";
+                continue;
+            }
+            if (field.typeName == "LocalizedStringId" || field.name == "LocalizedStringId")
+            {
+                void* ptr = nullptr;
+                SafeRead(slot, &ptr, sizeof(ptr));
+                int32_t hash = 0;
+                if (ptr != nullptr)
+                {
+                    SafeRead(static_cast<const uint8_t*>(ptr) + kLocalizedHashOffset, &hash, sizeof(hash));
+                }
+                values << "hash=" << hash << " " << DescribeObject(ptr);
+                continue;
+            }
+            void* ptr = nullptr;
+            uint64_t raw = 0;
+            SafeRead(slot, &raw, sizeof(raw));
+            SafeRead(slot, &ptr, sizeof(ptr));
+            values << "0x" << std::hex << raw << std::dec << " " << DescribeObject(ptr);
+        }
+        return values.str();
+    }
+
+    // Writes one [GCDump] line for this entity.
+    void LogGcDump(const char* kind) const
+    {
+        if (!ReinforcementText::DiscoveryEnabled())
+        {
+            return;
+        }
+        uintptr_t bus = 0;
+        uintptr_t parentBus = 0;
+        EntityBuses(this->m_nativeEntity, bus, parentBus);
+        ReinforcementText::DumpCreate(kind, Address(), bus, parentBus, DataTypeName(), SnapshotDump());
+    }
+
+    // Registers Character/Hero on this cost row's bus.
+    void RegisterCostField(const char* name)
+    {
+        const std::string kit = FieldString(name);
+        uintptr_t bus = 0;
+        uintptr_t parentBus = 0;
+        EntityBuses(this->m_nativeEntity, bus, parentBus);
+        ReinforcementText::RegisterCostKit(Address(), bus, parentBus, kit);
+        if (!kit.empty())
+        {
+            ReinforcementText::BindKit(Address(), kit);
+        }
+    }
+
 private:
-    // Logs the entity, its owner, Character/Hero/Text values already on the data, and the field list.
+    // Logs the entity, its owner, every CString, and the field list.
     void LogCreated()
     {
         if (!ReinforcementText::DiscoveryEnabled() || !ReinforcementText::DiscoveryLogAllowed())
@@ -301,18 +546,13 @@ private:
             return;
         }
         std::ostringstream fields;
-        std::ostringstream values;
         for (const FieldDesc& field : m_fields)
         {
             fields << field.name << ":" << field.typeName << " ";
-            if (field.name == "Character" || field.name == "Hero" || field.name == "Text" || field.name == "InstanceName")
-            {
-                values << " " << field.name << "=\"" << ReadStoredString(this->m_data, field.offset) << "\"";
-            }
         }
         KYBER_LOG(Info, "[GCTextDiscovery] created entity=" << std::hex << Address() << std::dec << " data=" << DataTypeName()
-                                                            << " isComponent=" << IsComponentText() << DescribeOwners(this->m_nativeEntity)
-                                                            << values.str() << " fields=[ " << fields.str() << "]");
+                                                            << " isComponent=" << IsComponentText() << SnapshotCStrings()
+                                                            << " fields=[ " << fields.str() << "]");
     }
 
     // Data type name, or "<unknown>" when any link in the chain is null.
@@ -383,26 +623,28 @@ bool EndsWithCount(const std::string& text)
     return digits1 > 0;
 }
 
-// TextElementData wrapper: discovery logging plus the optional GC_TEXT_FIELD writer (created only for bound entities).
+// TextElementData wrapper: writes cur/start on the same bus as a cost row.
 class GcTextElementEntity : public GcTextEntityBase<TextElementData>
 {
 public:
-    // Starts observing the text field when GC_TEXT_FIELD is set and exists; creates no writer yet.
+    // Binds this label to a cost-row kit on the same bus and starts the cur/start writer.
     GcTextElementEntity(EntityManager* entityManager, NativeEntity* entity, TextElementData* data)
         : GcTextEntityBase<TextElementData>(entity, data, true)
     {
-        if (ReinforcementText::WriterEnabled())
+        const std::string& field = ReinforcementText::TextField();
+        if (HasField(field))
         {
-            const std::string& field = ReinforcementText::TextField();
-            if (HasField(field))
-            {
-                m_active = true;
-                Refresh(true);
-            }
-            else if (ReinforcementText::DiscoveryEnabled() && ReinforcementText::DiscoveryLogAllowed())
-            {
-                KYBER_LOG(Warning, "[GCTextDiscovery] GC_TEXT_FIELD '" << field << "' is not a field of TextElementData; writer disabled");
-            }
+            m_active = true;
+            uintptr_t bus = 0;
+            uintptr_t parentBus = 0;
+            EntityBuses(this->m_nativeEntity, bus, parentBus);
+            ReinforcementText::RegisterTextSlot(Address(), bus, parentBus);
+            TryBindFromBus();
+            Refresh(true);
+        }
+        else if (ReinforcementText::DiscoveryEnabled() && ReinforcementText::DiscoveryLogAllowed())
+        {
+            KYBER_LOG(Warning, "[GCTextDiscovery] field '" << field << "' is not on TextElementData; writer disabled");
         }
     }
 
@@ -423,15 +665,44 @@ public:
         {
             return;
         }
+        TryBindFromBus();
         const bool isSource = modification->Is(ReinforcementText::SourceField().c_str());
         const bool isField = modification->Is(ReinforcementText::TextField().c_str());
         if (isSource || isField)
         {
+            uintptr_t bus = 0;
+            uintptr_t parentBus = 0;
+            EntityBuses(this->m_nativeEntity, bus, parentBus);
+            ReinforcementText::NoteTextSelection(Address(), bus, parentBus, ReadSourceText());
+            LogGcDump("select");
             Refresh(isSource);
         }
     }
 
 private:
+    // Binds this label when a cost row is already on the same bus or parent bus.
+    void TryBindFromBus()
+    {
+        if (!ReinforcementText::kitFor(Address()).empty())
+        {
+            return;
+        }
+        uintptr_t bus = 0;
+        uintptr_t parentBus = 0;
+        EntityBuses(this->m_nativeEntity, bus, parentBus);
+        std::string kit = KitOnBuses(bus, parentBus);
+        if (kit.empty())
+        {
+            kit = ReinforcementText::KitForLocalizedHash(ReadLocalizedHash());
+        }
+        if (!kit.empty())
+        {
+            ReinforcementText::BindKit(Address(), kit);
+            ReinforcementText::RegisterCostKit(Address(), bus, parentBus, kit);
+            RegisterCallback();
+        }
+    }
+
     // Creates the field writer on first use (string type resolved lazily); false means retry later.
     bool EnsureWriter()
     {
@@ -532,15 +803,16 @@ private:
                     m_orig = text;
                 }
                 m_lastWritten.clear(); // The game replaced the label; force a rewrite.
-                if (ReinforcementText::TryBindBySubstring(Address(), text))
+                if (ReinforcementText::TryBindBySubstring(Address(), text) || ReinforcementText::TryBindByKitTokens(Address(), text))
                 {
+                    uintptr_t bus = 0;
+                    uintptr_t parentBus = 0;
+                    EntityBuses(this->m_nativeEntity, bus, parentBus);
+                    ReinforcementText::RegisterCostKit(Address(), bus, parentBus, ReinforcementText::kitFor(Address()));
                     RegisterCallback();
-                    if (ReinforcementText::DiscoveryEnabled() && ReinforcementText::DiscoveryLogAllowed())
-                    {
-                        KYBER_LOG(Info, "[GCTextDiscovery] bound entity=" << std::hex << Address() << std::dec
-                                                                          << " to kit=" << ReinforcementText::kitFor(Address()) << " by text \""
-                                                                          << text << "\"");
-                    }
+                    KYBER_LOG(Info, "[GCText] bound entity=" << std::hex << Address() << std::dec
+                                                             << " to kit=" << ReinforcementText::kitFor(Address()) << " by text \""
+                                                             << text << "\"");
                 }
             }
         }
@@ -554,7 +826,23 @@ private:
         {
             return;
         }
-        const std::string kit = ReinforcementText::kitFor(Address());
+        TryBindFromBus();
+        std::string kit = ReinforcementText::kitFor(Address());
+        if (kit.empty())
+        {
+            const std::string label = !m_orig.empty() ? m_orig : ReadSourceText();
+            if (ReinforcementText::TryBindBySubstring(Address(), label) || ReinforcementText::TryBindByKitTokens(Address(), label))
+            {
+                uintptr_t bus = 0;
+                uintptr_t parentBus = 0;
+                EntityBuses(this->m_nativeEntity, bus, parentBus);
+                kit = ReinforcementText::kitFor(Address());
+                ReinforcementText::RegisterCostKit(Address(), bus, parentBus, kit);
+                RegisterCallback();
+                KYBER_LOG(Info, "[GCText] bound entity=" << std::hex << Address() << std::dec << " to kit=" << kit
+                                                         << " by late text \"" << label << "\"");
+            }
+        }
         ReinforcementLimits::Entry entry;
         if (kit.empty() || !ReinforcementText::ResolveEntry(kit, entry))
         {
@@ -598,9 +886,11 @@ private:
         }
         m_lastWritten = text;
         m_writing = false;
-        if (ReinforcementText::DiscoveryEnabled() && ReinforcementText::DiscoveryLogAllowed())
+        static int s_writeLogs = 0;
+        if (s_writeLogs < 40)
         {
-            KYBER_LOG(Info, "[GCTextDiscovery] wrote entity=" << std::hex << Address() << std::dec << " text=\"" << text << "\"");
+            s_writeLogs++;
+            KYBER_LOG(Info, "[GCText] wrote entity=" << std::hex << Address() << std::dec << " text=\"" << text << "\"");
         }
     }
 
@@ -626,24 +916,160 @@ public:
     {}
 };
 
-// Discovery wrapper for BattlepointUnitCostEntityData (creation and property changes).
+// Cost row for troopers/reinforcements: publishes Character as the kit id.
 class GcUnitCostEntity : public GcTextEntityBase<BattlepointUnitCostEntityData>
 {
 public:
-    // Logs creation and changes.
+    // Binds Character onto this entity's bus.
     GcUnitCostEntity(EntityManager* entityManager, NativeEntity* entity, BattlepointUnitCostEntityData* data)
         : GcTextEntityBase<BattlepointUnitCostEntityData>(entity, data, true)
-    {}
+    {
+        RegisterCostField("Character");
+    }
+
+    // Re-reads Character when the game writes it after create.
+    void PropertyChanged(PropertyModification* modification) override
+    {
+        GcTextEntityBase<BattlepointUnitCostEntityData>::PropertyChanged(modification);
+        if (modification->Is("Character"))
+        {
+            RegisterCostField("Character");
+        }
+    }
+
+    // Drops the bus binding.
+    void OnDestroy() override
+    {
+        ReinforcementText::UnregisterCostKit(Address());
+        GcTextEntityBase<BattlepointUnitCostEntityData>::OnDestroy();
+    }
 };
 
-// Discovery wrapper for BattlepointHeroCostEntityData (creation only).
+// Cost row for heroes: publishes Hero as the kit id.
 class GcHeroCostEntity : public GcTextEntityBase<BattlepointHeroCostEntityData>
 {
 public:
-    // Logs creation only.
+    // Binds Hero onto this entity's bus.
     GcHeroCostEntity(EntityManager* entityManager, NativeEntity* entity, BattlepointHeroCostEntityData* data)
         : GcTextEntityBase<BattlepointHeroCostEntityData>(entity, data, false)
-    {}
+    {
+        RegisterCostField("Hero");
+    }
+
+    // Re-reads Hero when the game writes it after create.
+    void PropertyChanged(PropertyModification* modification) override
+    {
+        GcTextEntityBase<BattlepointHeroCostEntityData>::PropertyChanged(modification);
+        if (modification->Is("Hero"))
+        {
+            RegisterCostField("Hero");
+        }
+    }
+
+    // Drops the bus binding.
+    void OnDestroy() override
+    {
+        ReinforcementText::UnregisterCostKit(Address());
+        GcTextEntityBase<BattlepointHeroCostEntityData>::OnDestroy();
+    }
+};
+
+// Spawn-card widget: writes Enabled/IsEnabled from live GCR1 counts.
+template<class D>
+class GcWidgetEntity : public GcTextEntityBase<D>
+{
+public:
+    // Binds this widget to a cost-row kit and registers the enable writer.
+    GcWidgetEntity(EntityManager* entityManager, NativeEntity* entity, D* data)
+        : GcTextEntityBase<D>(entity, data, false)
+    {
+        m_enabledField = this->FirstField({ "Enabled", "IsEnabled" });
+        uintptr_t bus = 0;
+        uintptr_t parentBus = 0;
+        EntityBuses(this->m_nativeEntity, bus, parentBus);
+        m_bus = bus != 0 ? bus : parentBus;
+        m_kit = KitOnBuses(bus, parentBus);
+        ReinforcementWidgets::Bind(this->Address(), m_bus, m_kit, [this](bool enabled) { WriteEnabled(enabled); }, parentBus);
+        ReinforcementText::RegisterCardWidget(this->Address(), m_bus, parentBus, EntityDataName(this->m_nativeEntity));
+        if (ReinforcementWidgets::IsDiscoveryEnabled() && ReinforcementText::DiscoveryLogAllowed())
+        {
+            KYBER_LOG(Info, "[WidgetDiscovery] widget=" << std::hex << this->Address() << std::dec << " kit=" << m_kit
+                                                        << " enabledField=" << m_enabledField << this->SnapshotCStrings());
+        }
+    }
+
+    // Drops the widget binding.
+    void OnDestroy() override
+    {
+        ReinforcementWidgets::Unbind(this->Address());
+        GcTextEntityBase<D>::OnDestroy();
+    }
+
+    // Forwards, then retries kit bind if the cost row appeared later.
+    void PropertyChanged(PropertyModification* modification) override
+    {
+        GcTextEntityBase<D>::PropertyChanged(modification);
+        if (m_kit.empty())
+        {
+            uintptr_t bus = 0;
+            uintptr_t parentBus = 0;
+            EntityBuses(this->m_nativeEntity, bus, parentBus);
+            m_kit = KitOnBuses(bus, parentBus);
+        }
+    }
+
+private:
+    // Writes the TypeInfo enable flag and fires Enable/Disable so input stays blocked.
+    void WriteEnabled(bool enabled)
+    {
+        if (m_kit.empty())
+        {
+            uintptr_t bus = 0;
+            uintptr_t parentBus = 0;
+            EntityBuses(this->m_nativeEntity, bus, parentBus);
+            m_kit = KitOnBuses(bus, parentBus);
+        }
+        if (this->m_nativeEntity == nullptr)
+        {
+            return;
+        }
+        if (!m_enabledField.empty() && EnsureWriter())
+        {
+            m_enabledWriter.Set(&enabled);
+        }
+        this->FireEvent(enabled ? "Enable" : "Disable");
+    }
+
+    // Creates the Boolean field writer once the native type is available.
+    bool EnsureWriter()
+    {
+        if (m_ready)
+        {
+            return true;
+        }
+        if (g_program == nullptr || g_program->m_entityManager == nullptr)
+        {
+            return false;
+        }
+        const TypeInfo* boolType = g_program->m_entityManager->GetNativeType("Boolean");
+        if (boolType == nullptr)
+        {
+            boolType = g_program->m_entityManager->GetNativeType("bool");
+        }
+        if (boolType == nullptr)
+        {
+            return false;
+        }
+        m_enabledWriter = this->template CreateFieldOverride<bool>(m_enabledField.c_str(), boolType);
+        m_ready = m_enabledWriter.HasConnection();
+        return m_ready;
+    }
+
+    PropertyWriter<bool> m_enabledWriter;
+    std::string m_enabledField;
+    std::string m_kit;
+    uintptr_t m_bus = 0;
+    bool m_ready = false;
 };
 
 // Creator matching KB_INTERNAL_IMPLEMENT_ENTITY's generated function.
@@ -653,18 +1079,21 @@ KyberEntityBase* CreateWrapper(EntityManager* entityManager, NativeEntity* entit
     return new W(entityManager, entity, reinterpret_cast<D*>(data));
 }
 
-// Registers the native-type creators only when an env var asks for them (so normal runs wrap nothing).
+// Registers the spawn-card entity wrappers for every run.
 bool RegisterGcTextCreators()
 {
-    if (!ReinforcementText::DiscoveryEnabled() && !ReinforcementText::WriterEnabled())
-    {
-        return false;
-    }
     static EntityStaticRegistrar textElement("TextElementData", CreateWrapper<GcTextElementEntity, TextElementData>, false);
     static EntityStaticRegistrar unitCost("BattlepointUnitCostEntityData", CreateWrapper<GcUnitCostEntity, BattlepointUnitCostEntityData>, false);
     static EntityStaticRegistrar heroCost("BattlepointHeroCostEntityData", CreateWrapper<GcHeroCostEntity, BattlepointHeroCostEntityData>, false);
-    static EntityStaticRegistrar stringCache(
-        "LocalizedStringCacheEntityData", CreateWrapper<GcCreationOnlyEntity, LocalizedStringCacheEntityData>, false);
+    if (ReinforcementText::DiscoveryEnabled())
+    {
+        static EntityStaticRegistrar stringCache(
+            "LocalizedStringCacheEntityData", CreateWrapper<GcCreationOnlyEntity, LocalizedStringCacheEntityData>, false);
+        (void)stringCache;
+    }
+    static EntityStaticRegistrar wsWidget("WSUIWidgetEntityData", CreateWrapper<GcWidgetEntity<WSUIWidgetEntityData>, WSUIWidgetEntityData>, false);
+    static EntityStaticRegistrar listItem(
+        "FBUIListItemWidgetEntityData", CreateWrapper<GcWidgetEntity<FBUIListItemWidgetEntityData>, FBUIListItemWidgetEntityData>, false);
     return true;
 }
 

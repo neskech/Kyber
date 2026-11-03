@@ -3,6 +3,7 @@
 #include <Script/LuaConsole.h>
 
 #include <Core/Program.h>
+#include <Misc/ReinforcementLimits.h>
 
 namespace Kyber::Script
 {
@@ -122,6 +123,16 @@ static int ConsoleExecuteFunc(lua_State* L)
     return 0;
 }
 
+// Feeds a GCR1 line straight into this process's reinforcement store (listen-server host client).
+static int ConsolePushReinforcementsFunc(lua_State* L)
+{
+    if (lua_isstring(L, 1))
+    {
+        ReinforcementLimits::ParseLine(luaL_checkstring(L, 1));
+    }
+    return 0;
+}
+
 static int ConsoleGetSettingsFunc(lua_State* L)
 {
     if (!lua_isstring(L, 1))
@@ -149,6 +160,7 @@ static const luaL_Reg s_consoleTableFuncs[] = {
     { "Register", ConsoleRegisterFunc }, 
     { "Execute", ConsoleExecuteFunc }, 
     { "GetSettings", ConsoleGetSettingsFunc },
+    { "PushReinforcements", ConsolePushReinforcementsFunc },
     { NULL, NULL } 
 };
 // clang-format on

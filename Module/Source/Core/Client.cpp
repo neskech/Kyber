@@ -9,7 +9,10 @@
 #include <SDK/TypeInfo.h>
 #include <SDK/SDK.h>
 #include <SDK/Funcs.h>
+#include <Misc/ChatFilter.h>
 #include <Misc/ReinforcementLimits.h>
+#include <Misc/ReinforcementText.h>
+#include <Misc/ReinforcementWidgets.h>
 
 #include <optional>
 
@@ -157,8 +160,10 @@ __int64 ClientStateChangeHk(__int64 inst, ClientState currentClientState, Client
     {
         static bool firstStartup = true;
 
-        // New client session: drop stale GCR1 counts from a prior match.
+        // New client session: drop stale GCR1 counts and spawn-card bindings from a prior match.
         ReinforcementLimits::Clear();
+        ReinforcementText::ClearUi();
+        ReinforcementWidgets::Clear();
 
         // g_program->m_console->UnregisterCommands();
         g_program->m_allowInteraction = false;
@@ -440,6 +445,7 @@ void Client::InitializeHooks()
     }
     
     m_squadManager->InitializeHooks();
+    ChatFilter::InitializeHooks();
 
     Hook::ApplyQueuedActions();
     KYBER_LOG(Debug, "[Client] Initialized Client Hooks");

@@ -173,6 +173,13 @@ void ChatSystemProcessIncomingMessageHk(ChatChannel channel, const char* message
 {
     static const auto trampoline = HookManager::Call(ChatSystemProcessIncomingMessageHk);
 
+    static int s_incomingLogged = 0;
+    if (message != nullptr && s_incomingLogged < 30)
+    {
+        ++s_incomingLogged;
+        KYBER_LOG(Info, "[Chat] incoming channel=" << static_cast<int>(channel) << " text=" << std::string(message).substr(0, 40));
+    }
+
     // Reinforcement-limit lines from the server plugin are consumed here and never shown in chat
     if (message != nullptr && strncmp(message, "GCR1|", 5) == 0)
     {
@@ -187,6 +194,7 @@ void ChatSystemProcessIncomingMessageHk(ChatChannel channel, const char* message
         }
         else if (ReinforcementLimits::ParseLine(message))
         {
+            KYBER_LOG(Info, "[Chat] GCR1 parsed");
             return;
         }
     }
@@ -206,7 +214,21 @@ void ChatSystemProcessIncomingMessageHk(ChatChannel channel, const char* message
 
 void ChatFilter::InitializeHooks()
 {
+    static bool installed = false;
+    if (installed)
+    {
+        return;
+    }
+    installed = true;
     HookManager::CreateHook(HOOK_OFFSET(0x1484AB3E0), ChatSystemProcessAndSendChatMessageHk);
     HookManager::CreateHook(HOOK_OFFSET(0x1484A9250), ChatSystemProcessIncomingMessageHk);
+    KYBER_LOG(Info, "[Chat] incoming hooks installed");
+    const char* selfTest = "GCR1|GC_SELFTEST/Kit_SelfTest:0:0";
+    KYBER_LOG(Info, "[Chat] self-test incoming Admin " << selfTest);
+    if (ReinforcementLimits::ParseLine(selfTest))
+    {
+        KYBER_LOG(Info, "[Chat] self-test GCR1 parsed");
+    }
+    ReinforcementLimits::Clear();
 }
 } // namespace Kyber

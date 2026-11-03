@@ -30,6 +30,12 @@ public:
     // Returns a copy of the store, sorted by kit name.
     static std::vector<Entry> Snapshot();
 
+    // Returns a copy of the store in GCR1 parse order (first seen).
+    static std::vector<Entry> SnapshotOrdered();
+
+    // Returns every stored entry, stale or not; the store is cleared each client session.
+    static std::vector<Entry> SnapshotAll();
+
     // True when the store holds no kits (no allocation).
     static bool IsEmpty();
 
@@ -41,5 +47,8 @@ public:
 
     // Returns the text after the last '/' of a kit name.
     static std::string ShortName(const std::string& kit);
+
+    // True when two kit ids name the same asset (exact, trailing name, or suffix).
+    static bool Matches(const std::string& left, const std::string& right);
 };
 } // namespace Kyber

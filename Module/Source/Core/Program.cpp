@@ -7,6 +7,7 @@
 #include <Base/Logo.h>
 #include <Base/Version.h>
 #include <Core/DebugHooks.h>
+#include <Misc/ChatFilter.h>
 #include <Misc/ReinforcementText.h>
 #include <Misc/ReinforcementWidgets.h>
 #include <Core/Memory.h>
@@ -245,6 +246,7 @@ void Program::InitializationThread()
     SetConsoleTitleA(title.c_str());
 
     KYBER_LOG(Info, "[Engine] Initializing KYBER v" << KYBER_VERSION);
+    KYBER_LOG(Info, "[GC] Kyber.dll build " << __DATE__ << " " << __TIME__);
 
     bool useStdinConsole = (m_isDedicatedServer && !hideConsole) || std::getenv("KYBER_STDIN_CONSOLE") != nullptr;
     if (useStdinConsole)
@@ -680,13 +682,16 @@ const char* GetLocalizedStringInternalHk(const char* inst, const char* id)
     static const auto trampoline = HookManager::Call(GetLocalizedStringInternalHk);
     const char* res = trampoline(inst, id);
 
-    // Reinforcement labels (GC_TEXT_MODE=localizedId) serve their own text; discovery only logs.
-    if (ReinforcementText::WriterEnabled() || ReinforcementText::DiscoveryEnabled())
+    if (const char* custom = ReinforcementText::LookupLocalized(id))
     {
-        if (const char* custom = ReinforcementText::LookupLocalized(id))
-        {
-            return custom;
-        }
+        return custom;
+    }
+    if (const char* rewritten = ReinforcementText::RewriteLocalized(id, res))
+    {
+        return rewritten;
+    }
+    if (ReinforcementText::DiscoveryEnabled())
+    {
         ReinforcementText::LogLocalization(id, res);
     }
 
@@ -822,6 +827,7 @@ void Program::Initialize()
     InitializeGamePatches();
 
     StreamManagerKyberEvent::InitializeHooks();
+    ChatFilter::InitializeHooks();
 
     m_server->Initialize();
     m_client->Initialize();

@@ -2,8 +2,9 @@
 
 #pragma once
 
-// Spawn-menu button layer: widget discovery logging and (not yet mapped) enable/gray-out of kit buttons.
+// Spawn-menu button layer: enable/gray-out of kit buttons via TypeInfo Enabled/IsEnabled.
 
+#include <functional>
 #include <string>
 
 namespace Kyber
@@ -11,8 +12,18 @@ namespace Kyber
 class ReinforcementWidgets
 {
 public:
-    // Enables or disables the spawn button for a kit; a no-op until the widget offsets are mapped.
+    // Writes the game Enabled/IsEnabled flag for every widget bound to this kit.
     static void Apply(const std::string& kitName, bool enabled);
+
+    // Remembers a spawn-card widget so Apply can write its enable flag.
+    static void Bind(uintptr_t entityAddress, uintptr_t bus, const std::string& kit, std::function<void(bool)> setEnabled,
+                     uintptr_t parentBus = 0);
+
+    // Drops a widget when its entity is destroyed.
+    static void Unbind(uintptr_t entityAddress);
+
+    // Clears every widget binding (new online session).
+    static void Clear();
 
     // True when GC_WIDGET_DISCOVERY=1 is set in the environment.
     static bool IsDiscoveryEnabled();

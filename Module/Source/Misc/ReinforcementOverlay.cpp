@@ -42,8 +42,11 @@ public:
         (void)type;
         (void)params;
 
-        // Nothing to draw or rewrite: skip all work (no writer, empty store).
-        if (!ReinforcementText::WriterEnabled() && ReinforcementLimits::IsEmpty())
+        ReinforcementText::ResolvePending();
+        ReinforcementText::PollDiscovery();
+
+        // Nothing to draw or rewrite: skip all work.
+        if (ReinforcementLimits::IsEmpty() && !ReinforcementText::HasWriters())
         {
             s_cachedLines.clear();
             return;
@@ -67,6 +70,7 @@ public:
                 line.depleted = entry.cur == 0;
                 line.text = ReinforcementLimits::ShortName(entry.kit) + " " + std::to_string(entry.cur) + "/" +
                             std::to_string(entry.start);
+                ReinforcementWidgets::Apply(line.kit, !line.depleted);
                 s_cachedLines.push_back(std::move(line));
             }
         }
@@ -80,10 +84,8 @@ public:
                 DebugRenderer_drawText(20, y, line.depleted ? Colors::RED : Colors::GREEN, line.text, 1);
                 y += 18;
             }
-            ReinforcementWidgets::Apply(line.kit, !line.depleted);
         }
 
-        // Rewrites bound spawn-button labels (no-op unless GC_TEXT_FIELD is set).
         ReinforcementText::RefreshAll();
     }
 

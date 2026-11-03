@@ -2,7 +2,7 @@
 
 #pragma once
 
-// Spawn-button label text: pure formatting, kit binding for text entities, and GC_TEXT_* discovery helpers.
+// Spawn-button label text: kit binding from cost rows, live cur/start writes, and optional GC_TEXT_* discovery.
 
 #include <Misc/ReinforcementLimits.h>
 
@@ -32,19 +32,53 @@ public:
     // True when GC_TEXT_DISCOVERY=1.
     static bool DiscoveryEnabled();
 
-    // Value of GC_TEXT_FIELD, empty when unset.
+    // Label field to write; GC_TEXT_FIELD or "Text".
     static const std::string& TextField();
 
-    // Value of GC_TEXT_SOURCE_FIELD (falls back to GC_TEXT_FIELD): the string field read for binding and the cost text.
+    // Field read for the original label; GC_TEXT_SOURCE_FIELD or TextField().
     static const std::string& SourceField();
 
     // True when GC_TEXT_MODE=localizedId (default is string).
     static bool LocalizedIdMode();
 
-    // True when the writer is configured (GC_TEXT_FIELD set).
+    // True when label writers should run (always, once a Text field exists).
     static bool WriterEnabled();
 
-    // Binds a text entity address to a kit short name.
+    // True when at least one per-frame writer is registered.
+    static bool HasWriters();
+
+    // Records a cost-row settings id; keeps it pending until a GCR1 kit matches.
+    static void RegisterCostKit(uintptr_t entityAddress, uintptr_t bus, uintptr_t parentBus, const std::string& kit);
+
+    // Drops a cost-row kit when that entity is destroyed.
+    static void UnregisterCostKit(uintptr_t entityAddress);
+
+    // Matches pending settings ids to GCR1 kits and cards; safe to call often.
+    static void ResolvePending();
+
+    // Records a spawn-card widget in creation order for index pairing.
+    static void RegisterCardWidget(uintptr_t entityAddress, uintptr_t bus, uintptr_t parentBus, const std::string& typeName);
+
+    // Drops a widget from the order list.
+    static void UnregisterCardWidget(uintptr_t entityAddress);
+
+    // Records a TextElement so a matched card can receive cur/start.
+    static void RegisterTextSlot(uintptr_t entityAddress, uintptr_t bus, uintptr_t parentBus);
+
+    // Learns settings-id -> widget from a selected card's live Text value.
+    static void NoteTextSelection(uintptr_t entityAddress, uintptr_t bus, uintptr_t parentBus, const std::string& text);
+
+    // Kit id bound to this bus or its parent, empty when none.
+    static std::string KitForBus(uintptr_t bus);
+
+    // Clears cost-row bus bindings (new online session).
+    static void ClearUi();
+
+    // Logs one identifier dump; returns the seq, or -1 when the create cap is hit.
+    static int DumpCreate(const char* kind, uintptr_t entity, uintptr_t bus, uintptr_t parentBus, const std::string& typeName,
+                          const std::string& fields);
+
+    // Binds a text entity address to a kit id.
     static void BindKit(uintptr_t entityAddress, const std::string& kitShortName);
 
     // Returns the kit short name bound to an entity address, empty when none.
@@ -52,6 +86,15 @@ public:
 
     // Binds the entity via GC_TEXT_BIND when its current text contains a configured substring; true if bound.
     static bool TryBindBySubstring(uintptr_t entityAddress, const std::string& currentText);
+
+    // Binds the entity when the card label matches a live GCR1 kit short name.
+    static bool TryBindByKitTokens(uintptr_t entityAddress, const std::string& currentText);
+
+    // Appends cur/start onto a loc result that names a limited kit; nullptr when it does not.
+    static const char* RewriteLocalized(const char* id, const char* result);
+
+    // Kit remembered from a loc rewrite, empty when this hash was never a limited card.
+    static std::string KitForLocalizedHash(int32_t hash);
 
     // Finds the live entry whose short kit name matches; false when unknown.
     static bool ResolveEntry(const std::string& kitShortName, ReinforcementLimits::Entry& out);
@@ -70,6 +113,15 @@ public:
 
     // Marks that a UI screen (spawn screen) was just opened and resets the localization log cap.
     static void NoteSpawnScreenOpened();
+
+    // Remembers a cost/text/widget row so PollDiscovery can re-read its CString fields.
+    static void RegisterDiscoveryPoll(uintptr_t entityAddress, const std::string& dataType, std::function<std::string()> snapshot);
+
+    // Drops a poll row when that entity is destroyed.
+    static void UnregisterDiscoveryPoll(uintptr_t entityAddress);
+
+    // Logs every registered row once per second for 30 s after the first row or spawn-screen open.
+    static void PollDiscovery();
 
     // Logs a localization lookup while the spawn screen was opened in the last 10 s; never alters results.
     static void LogLocalization(const char* id, const char* result);

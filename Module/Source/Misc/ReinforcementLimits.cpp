@@ -2,7 +2,11 @@
 
 #include <Misc/ReinforcementLimits.h>
 
+#include <Base/Log.h>
+#include <Misc/ReinforcementText.h>
+
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <map>
 #include <mutex>
@@ -17,6 +21,7 @@ constexpr auto kStaleAfter = std::chrono::seconds(90);
 
 std::mutex s_mutex;
 std::map<std::string, ReinforcementLimits::Entry> s_store;
+std::vector<std::string> s_order; // First-seen GCR1 kit order.
 
 // True when the entry was refreshed recently enough to trust.
 bool IsFresh(const ReinforcementLimits::Entry& entry)
@@ -68,7 +73,7 @@ bool ParseEntry(const std::string& entry, ReinforcementLimits::Entry& out)
     long long cur = 0;
     long long start = 0;
     if (!ParseInt(entry.substr(prevColon + 1, lastColon - prevColon - 1), cur) || !ParseInt(entry.substr(lastColon + 1), start) ||
-        start <= 0)
+        start < 0)
     {
         return false;
     }
@@ -107,13 +112,21 @@ bool ReinforcementLimits::ParseLine(const std::string& line)
         pos = end + 1;
     }
 
+    KYBER_LOG(Info, "[ReinforcementLimits] GCR1 line parsed, entries=" << parsed.size() << " first=" << (parsed.empty() ? std::string() : parsed.front().kit));
     const auto now = std::chrono::steady_clock::now();
-    std::lock_guard<std::mutex> lock(s_mutex);
-    for (Entry& entry : parsed)
     {
-        entry.updatedAt = now;
-        s_store[entry.kit] = entry;
+        std::lock_guard<std::mutex> lock(s_mutex);
+        for (Entry& entry : parsed)
+        {
+            entry.updatedAt = now;
+            if (s_store.find(entry.kit) == s_store.end())
+            {
+                s_order.push_back(entry.kit);
+            }
+            s_store[entry.kit] = entry;
+        }
     }
+    ReinforcementText::ResolvePending();
     return true;
 }
 
@@ -122,6 +135,7 @@ void ReinforcementLimits::Clear()
 {
     std::lock_guard<std::mutex> lock(s_mutex);
     s_store.clear();
+    s_order.clear();
 }
 
 // True when no kit is stored (stale entries count as stored).
@@ -148,6 +162,36 @@ std::vector<ReinforcementLimits::Entry> ReinforcementLimits::Snapshot()
     return out;
 }
 
+// Returns fresh entries in the order the first GCR1 line named each kit.
+std::vector<ReinforcementLimits::Entry> ReinforcementLimits::SnapshotOrdered()
+{
+    std::lock_guard<std::mutex> lock(s_mutex);
+    std::vector<Entry> out;
+    out.reserve(s_order.size());
+    for (const std::string& kit : s_order)
+    {
+        auto it = s_store.find(kit);
+        if (it != s_store.end() && IsFresh(it->second))
+        {
+            out.push_back(it->second);
+        }
+    }
+    return out;
+}
+
+// Returns every stored entry regardless of age.
+std::vector<ReinforcementLimits::Entry> ReinforcementLimits::SnapshotAll()
+{
+    std::lock_guard<std::mutex> lock(s_mutex);
+    std::vector<Entry> out;
+    out.reserve(s_store.size());
+    for (const auto& [kit, entry] : s_store)
+    {
+        out.push_back(entry);
+    }
+    return out;
+}
+
 // True when the kit is tracked, fresh, and exhausted.
 bool ReinforcementLimits::IsDepleted(const std::string& kit)
 {
@@ -160,13 +204,20 @@ bool ReinforcementLimits::Find(const std::string& kit, Entry& out)
 {
     std::lock_guard<std::mutex> lock(s_mutex);
     auto it = s_store.find(kit);
-    if (it == s_store.end() || !IsFresh(it->second))
+    if (it != s_store.end() && IsFresh(it->second))
     {
-        return false;
+        out = it->second;
+        return true;
     }
-
-    out = it->second;
-    return true;
+    for (const auto& [stored, entry] : s_store)
+    {
+        if (IsFresh(entry) && Matches(stored, kit))
+        {
+            out = entry;
+            return true;
+        }
+    }
+    return false;
 }
 
 // Returns the segment after the last slash in a kit path.
@@ -174,5 +225,32 @@ std::string ReinforcementLimits::ShortName(const std::string& kit)
 {
     size_t slash = kit.rfind('/');
     return slash == std::string::npos ? kit : kit.substr(slash + 1);
+}
+
+// True when two kit ids name the same asset (exact, trailing name, or suffix).
+bool ReinforcementLimits::Matches(const std::string& left, const std::string& right)
+{
+    if (left.empty() || right.empty())
+    {
+        return false;
+    }
+    const auto lower = [](std::string text) {
+        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return text;
+    };
+    if (lower(left) == lower(right))
+    {
+        return true;
+    }
+    const std::string leftName = lower(ShortName(left));
+    const std::string rightName = lower(ShortName(right));
+    if (leftName == rightName)
+    {
+        return true;
+    }
+    const auto endsWith = [](const std::string& text, const std::string& suffix) {
+        return text.size() >= suffix.size() && text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
+    };
+    return leftName.size() >= 4 && rightName.size() >= 4 && (endsWith(leftName, rightName) || endsWith(rightName, leftName));
 }
 } // namespace Kyber

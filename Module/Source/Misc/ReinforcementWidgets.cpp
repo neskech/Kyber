@@ -3,6 +3,7 @@
 #include <Misc/ReinforcementWidgets.h>
 
 #include <Base/Log.h>
+#include <Misc/ReinforcementLimits.h>
 #include <Misc/ReinforcementText.h>
 
 #define WIN32_LEAN_AND_MEAN
@@ -11,19 +12,29 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <sstream>
+#include <functional>
 #include <iomanip>
+#include <mutex>
+#include <sstream>
+#include <unordered_map>
+#include <vector>
 
 namespace Kyber
 {
 namespace
 {
-// Spawn widget layout is NOT mapped yet. Leave 0 until verified from a discovery log; 0 keeps Apply() inert.
-constexpr size_t kEnabledFlagOffset = 0; // Offset of the enabled flag inside the kit button widget.
-constexpr size_t kTintOffset = 0;        // Offset of the gray tint inside the kit button widget.
-constexpr uintptr_t kSetTextFn = 0;      // Address of the set-text function (unmapped).
-
 constexpr size_t kDumpSize = 0x200;
+
+struct WidgetSlot
+{
+    uintptr_t bus = 0;
+    uintptr_t parentBus = 0;
+    std::string kit;
+    std::function<void(bool)> setEnabled;
+};
+
+std::mutex s_mutex;
+std::unordered_map<uintptr_t, WidgetSlot> s_widgets;
 
 // Copies size bytes from ptr only when the whole range lies in one readable region.
 bool SafeCopy(const void* ptr, void* out, size_t size)
@@ -74,23 +85,79 @@ void ReinforcementWidgets::OnUIScreenMessage(const char* typeName, const void* m
     LogObject("UIScreenMessage", typeName, message);
 }
 
-void ReinforcementWidgets::Apply(const std::string& kitName, bool enabled)
+void ReinforcementWidgets::Bind(uintptr_t entityAddress, uintptr_t bus, const std::string& kit, std::function<void(bool)> setEnabled,
+                                uintptr_t parentBus)
 {
-    if (kEnabledFlagOffset == 0)
+    if (entityAddress == 0 || !setEnabled)
     {
-        static bool logged = false;
-        if (!logged && IsDiscoveryEnabled())
-        {
-            logged = true;
-            KYBER_LOG(Info, "[ReinforcementWidgets] widget offsets not mapped");
-        }
         return;
     }
+    std::lock_guard<std::mutex> lock(s_mutex);
+    s_widgets[entityAddress] = WidgetSlot{ bus, parentBus, kit, std::move(setEnabled) };
+    ReinforcementText::RegisterCardWidget(entityAddress, bus, parentBus, "widget");
+    static int s_bindLogs = 0;
+    if (s_bindLogs < 40)
+    {
+        s_bindLogs++;
+        KYBER_LOG(Info, "[GCWidget] bind entity=" << std::hex << entityAddress << " bus=" << bus << std::dec << " kit=" << kit);
+    }
+}
 
-    // Offsets mapped but no widget lookup exists yet: the per-kit widget instance must be resolved here before writing.
-    (void)kitName;
-    (void)enabled;
-    (void)kTintOffset;
-    (void)kSetTextFn;
+void ReinforcementWidgets::Unbind(uintptr_t entityAddress)
+{
+    ReinforcementText::UnregisterCardWidget(entityAddress);
+    std::lock_guard<std::mutex> lock(s_mutex);
+    s_widgets.erase(entityAddress);
+}
+
+void ReinforcementWidgets::Clear()
+{
+    std::lock_guard<std::mutex> lock(s_mutex);
+    s_widgets.clear();
+}
+
+void ReinforcementWidgets::Apply(const std::string& kitName, bool enabled)
+{
+    if (kitName.empty())
+    {
+        return;
+    }
+    ReinforcementText::ResolvePending();
+    std::vector<std::function<void(bool)>> writers;
+    size_t widgetCount = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        widgetCount = s_widgets.size();
+        for (auto& [address, slot] : s_widgets)
+        {
+            if (slot.kit.empty())
+            {
+                slot.kit = ReinforcementText::kitFor(address);
+            }
+            if (slot.kit.empty())
+            {
+                slot.kit = ReinforcementText::KitForBus(slot.bus);
+            }
+            if (slot.kit.empty())
+            {
+                slot.kit = ReinforcementText::KitForBus(slot.parentBus);
+            }
+            if (ReinforcementLimits::Matches(slot.kit, kitName) && slot.setEnabled)
+            {
+                writers.push_back(slot.setEnabled);
+            }
+        }
+    }
+    static int s_applyLogs = 0;
+    if (s_applyLogs < 40)
+    {
+        s_applyLogs++;
+        KYBER_LOG(Info, "[GCWidget] apply kit=" << kitName << " enabled=" << enabled << " matches=" << writers.size()
+                                                << " widgets=" << widgetCount);
+    }
+    for (const auto& writer : writers)
+    {
+        writer(enabled);
+    }
 }
 } // namespace Kyber
