@@ -10,10 +10,13 @@
 #include <SDK/Funcs.h>
 #include <SDK/Fb/WS.h>
 
+#include <vector>
+
 namespace Kyber
 {
 
 extern void ServerPlayerSetUnlock(ServerPlayer* player, const Guid& guid, bool value);
+extern void ServerPlayerSetRevokedUnlocks(ServerPlayer* player, const std::vector<uint32_t>& indices);
 
 TL_DECLARE_FUNC(0x14686B6F0, ServerPlayer*, ServerPlayerManager_createPlayer, void* inst, uint8_t connectionId, const eastl::string& name,
     LocalPlayerId localPlayerId, uint32_t playerId, bool isSpectator, bool a7);
@@ -316,6 +319,29 @@ static int ServerPlayerSetUnlock(lua_State* L)
     ServerPlayerSetUnlock(player, guid, grant);
 
     return 1;
+}
+
+// player:SetRevokedUnlocks({bitIndex, ...}) replaces the player's revoked unlock bits.
+static int ServerPlayerSetRevokedUnlocks(lua_State* L)
+{
+    ServerPlayer* player = LuaPlayerManager::GetServerPlayer(L, 1);
+    if (player == nullptr || !lua_istable(L, 2))
+    {
+        return 0;
+    }
+    std::vector<uint32_t> indices;
+    lua_Integer count = luaL_len(L, 2);
+    for (lua_Integer i = 1; i <= count; ++i)
+    {
+        lua_rawgeti(L, 2, i);
+        if (lua_isinteger(L, -1) && lua_tointeger(L, -1) >= 0)
+        {
+            indices.push_back(static_cast<uint32_t>(lua_tointeger(L, -1)));
+        }
+        lua_pop(L, 1);
+    }
+    ServerPlayerSetRevokedUnlocks(player, indices);
+    return 0;
 }
 
 static int ServerPlayerSetInvisible(lua_State* L)
@@ -782,6 +808,11 @@ static int ServerPlayerIndex(lua_State* L)
     else if (key == "SetUnlock")
     {
         lua_pushcfunction(L, ServerPlayerSetUnlock);
+        return 1;
+    }
+    else if (key == "SetRevokedUnlocks")
+    {
+        lua_pushcfunction(L, ServerPlayerSetRevokedUnlocks);
         return 1;
     }
     else if (key == "Kick")

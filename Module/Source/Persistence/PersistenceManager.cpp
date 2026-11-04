@@ -12,6 +12,10 @@
 
 #include <ToolLib/Func.h>
 
+#include <set>
+#include <unordered_map>
+#include <vector>
+
 namespace Kyber
 {
 TL_DECLARE_FUNC(0x1483EFEB0, __int64, ReplicatePersistence, void* inst, ServerPlayer* player);
@@ -53,32 +57,55 @@ static uint32_t GetUnlockCount()
     return kPlayerUnlockArraySize;
 }
 
-void ServerPlayerSetUnlock(ServerPlayer* player, const Guid& guid, bool value)
+// Unlock bit indices revoked per human player; every other base-game bit stays granted.
+static std::unordered_map<ServerPlayer*, std::set<uint32_t>> g_revokedUnlocks;
+
+// Rebuilds the player's unlock array as all granted minus their revoked bits (same calls as InitUnlockArrayHk).
+static void ApplyUnlockMask(ServerPlayer* player)
 {
     ServerGamePlayerExtent* extent = player->GetServerGamePlayerExtent();
+    extent->InitUnlockArray(kPlayerUnlockArraySize);
 
-    uint32_t unlockCount = GetUnlockCount();
-    extent->InitUnlockArray(unlockCount);
-    int32_t signedIndex = ServerPersistenceUnlocksGetBitIndex(*reinterpret_cast<__int64*>(0x143ED4480), guid);
-    KYBER_LOG(Info, "[GCUnlock] SetUnlock guid=" << guid.ToString() << " index=" << signedIndex << " count=" << unlockCount << " value=" << value);
-    if (signedIndex < 0 || static_cast<uint32_t>(signedIndex) >= unlockCount)
+    FBBitArray* bitArray = new (FB_SERVER_ARENA) FBBitArray(kPlayerUnlockArraySize);
+    bitArray->SetAllBits();
+    const std::set<uint32_t>& revoked = g_revokedUnlocks[player];
+    for (uint32_t index : revoked)
     {
-        return;
+        if (index < kPlayerUnlockArraySize)
+        {
+            bitArray->m_bits[index / 32] &= ~(1U << (index % 32));
+        }
     }
-    FBBitArray* bitArray = new (FB_SERVER_ARENA) FBBitArray(unlockCount);
-    memcpy(bitArray->m_bits, extent->m_unlockArray.m_bits, 4 * bitArray->m_dwordCount);
-
-    uint32_t index = static_cast<uint32_t>(signedIndex);
-
-    uint32_t* bits = bitArray->m_bits;
-    uint32_t elementIndex = index / 32;
-    uint32_t bitMask = 1U << (index % 32);
-    bits[elementIndex] ^= (bits[elementIndex] ^ static_cast<uint32_t>(-static_cast<int>(value))) & bitMask;
-
     extent->SetUnlocks(bitArray);
 
     bitArray->Destroy(nullptr);
     FB_SERVER_ARENA->del(bitArray);
+    KYBER_LOG(Info, "[GCUnlock] mask " << player->m_name << " revoked=" << revoked.size());
+}
+
+void ServerPlayerSetUnlock(ServerPlayer* player, const Guid& guid, bool value)
+{
+    int32_t index = ServerPersistenceUnlocksGetBitIndex(*reinterpret_cast<__int64*>(0x143ED4480), guid);
+    KYBER_LOG(Info, "[GCUnlock] SetUnlock guid=" << guid.ToString() << " index=" << index << " value=" << value);
+    if (index < 0 || static_cast<uint32_t>(index) >= kPlayerUnlockArraySize)
+    {
+        return;
+    }
+    if (value)
+    {
+        g_revokedUnlocks[player].erase(static_cast<uint32_t>(index));
+    }
+    else
+    {
+        g_revokedUnlocks[player].insert(static_cast<uint32_t>(index));
+    }
+    ApplyUnlockMask(player);
+}
+
+void ServerPlayerSetRevokedUnlocks(ServerPlayer* player, const std::vector<uint32_t>& indices)
+{
+    g_revokedUnlocks[player] = std::set<uint32_t>(indices.begin(), indices.end());
+    ApplyUnlockMask(player);
 }
 
 __int64 InitUnlockArrayHk(__int64 a1, ServerPlayer* player)
@@ -92,6 +119,7 @@ __int64 InitUnlockArrayHk(__int64 a1, ServerPlayer* player)
     // Uncomment to disable everything being unlocked
     // return trampoline(a1, player);
 
+    g_revokedUnlocks.erase(player);
     ServerGamePlayerExtent* extent = player->GetServerGamePlayerExtent();
     KYBER_LOG(Debug, "[Persistence] Initialized unlock array " << player->m_name << " " << std::hex << extent);
     //__int64 result = trampoline(a1, serverPlayer);
