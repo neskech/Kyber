@@ -12,6 +12,8 @@
 #include <Utilities/PlatformUtils.h>
 #include <Utilities/StringUtils.h>
 #include <Entity/KyberSettings.h>
+#include <Misc/StarCardLevels.h>
+#include <Misc/TickStats.h>
 
 #include <fstream>
 #include <stdlib.h>
@@ -560,28 +562,39 @@ bool MessageStreamAddMessageHk(void* inst, TypeObject* message)
 void ServerUpdatePassPreFrameHk(void* inst, const UpdateParameters& params)
 {
     static const auto trampoline = HookManager::Call(ServerUpdatePassPreFrameHk);
+    TickStats::Frame(true);
+    uint64_t t = TickStats::Now();
     trampoline(inst, params);
+    t = TickStats::Add(true, TickStats::Section_Game, t);
 
     if (g_program->m_entityManager != nullptr)
     {
         g_program->m_entityManager->UpdateEntities(Realm_Server, params);
     }
+    t = TickStats::Add(true, TickStats::Section_Entities, t);
 
     g_program->m_server->Heartbeat(params);
+    t = TickStats::Add(true, TickStats::Section_Heartbeat, t);
     g_threadExecutor->Process(GameThread_Server);
+    t = TickStats::Add(true, TickStats::Section_Executor, t);
     g_program->m_server->m_eventManager->ProcessEventQueue();
+    t = TickStats::Add(true, TickStats::Section_Events, t);
 
     if (g_program->m_server->IsRunning())
     {
         g_program->GetAPI()->Update();
     }
+    t = TickStats::Add(true, TickStats::Section_Api, t);
 
     if (g_program->m_scriptManager != nullptr)
     {
         g_program->m_scriptManager->GetEventManager().Fire("Server:UpdatePre", params.simulationDeltaTime.toSecondsAsFloat());
     }
+    t = TickStats::Add(true, TickStats::Section_Lua, t);
 
+    StarCardLevels::Poll();
     GenericUpdateManager::Get().Call(UpdateType_Server_PreFrame, params);
+    TickStats::Add(true, TickStats::Section_Generic, t);
 }
 
 // Only for in-proc servers.

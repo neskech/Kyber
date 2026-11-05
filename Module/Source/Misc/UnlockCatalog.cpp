@@ -6,9 +6,14 @@
 #include <Entity/NativeEntityManager.h>
 
 #include <Base/Log.h>
+#include <Core/Program.h>
+#include <Utilities/StringUtils.h>
+#include <Misc/AbilityWatch.h>
 #include <Misc/ReflectDump.h>
 #include <Misc/UnlockCatalog.h>
 #include <SDK/Funcs.h>
+#include <SDK/SDK.h>
+#include <SDK/Fb/WS.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -199,8 +204,155 @@ void Probe(DataContainer* kit, const std::string& path)
     WalkTable(path, "s", ReadPointerField(kit, kit->getType(), "SpecializationTable"), 2);
 }
 
+// Logs one offline inventory settings group: Enabled, item count, and the first items.
+static void ProbeInventory(const char* id)
+{
+    DataContainer* settings = g_program->GetSettingsObject<DataContainer>(id);
+    if (!Valid(settings))
+    {
+        KYBER_LOG(Info, "[GCInv] " << id << " settings=null");
+        return;
+    }
+    bool enabled = false;
+    ReadBool(settings, settings->getType(), "Enabled", enabled);
+    const FieldInfoData* info = FindField(settings->getType(), "InventoryItems");
+    const uint8_t* data = nullptr;
+    uint32_t size = 0;
+    bool hasArray = info != nullptr && ReadArray(reinterpret_cast<const uint8_t*>(settings) + info->fieldOffset, data, size);
+    std::ostringstream items;
+    for (uint32_t i = 0; hasArray && i < size && i < 40; ++i)
+    {
+        const char* item = nullptr;
+        if (SafeRead(data + i * sizeof(char*), &item, sizeof(item)))
+        {
+            items << ReadCString(item) << ",";
+        }
+    }
+    KYBER_LOG(Info, "[GCInv] " << id << " type=" << TypeName(settings->getType()) << " Enabled=" << enabled << " field=" << (info != nullptr)
+                               << " count=" << size << " items=" << items.str());
+}
+
+// Asset name when p points at a PlayerAbilityAsset subtype, else empty; reads the header TypeInfo, never calls into the object.
+static std::string AbilityName(uint64_t p)
+{
+    const TypeInfo* type = nullptr;
+    if (p < 0x10000 || !SafeRead(reinterpret_cast<const uint8_t*>(p) + sizeof(void*), &type, sizeof(type)) || !ReadableType(type) || std::strstr(TypeName(type), "PlayerAbilityAsset") == nullptr)
+    {
+        return {};
+    }
+    const char* name = nullptr;
+    SafeRead(reinterpret_cast<const uint8_t*>(p) + 0x18, &name, sizeof(name));
+    return ReadCString(name);
+}
+
+// Hex of `count` bytes at p, or "?" when unreadable.
+static std::string Hex(const uint8_t* p, int count)
+{
+    std::vector<uint8_t> bytes(count);
+    if (!SafeRead(p, bytes.data(), count))
+    {
+        return "?";
+    }
+    std::ostringstream out;
+    for (int i = 0; i < count; ++i)
+    {
+        out << std::hex << (bytes[i] < 16 ? "0" : "") << int(bytes[i]) << ((i % 8 == 7) ? " " : "");
+    }
+    return out.str();
+}
+
+// Logs every ability asset pointer within `size` bytes of base, and one pointer hop deeper.
+static void ScanForAbilities(const char* where, const uint8_t* base, uint32_t size, uint32_t innerSize)
+{
+    for (uint32_t off = 0; off < size; off += 8)
+    {
+        uint64_t q = 0;
+        if (!SafeRead(base + off, &q, sizeof(q)))
+        {
+            continue;
+        }
+        std::string name = AbilityName(q);
+        if (!name.empty())
+        {
+            KYBER_LOG(Info, "[GCAbil] " << where << " off=0x" << std::hex << off << " " << name << " ctx=" << Hex(base + off - 0x10, 0x40));
+            continue;
+        }
+        if (q < 0x10000 || q > 0x7FFFFFFFFFFF)
+        {
+            continue;
+        }
+        for (uint32_t inner = 0; inner < innerSize; inner += 8)
+        {
+            uint64_t r = 0;
+            if (!SafeRead(reinterpret_cast<const uint8_t*>(q) + inner, &r, sizeof(r)))
+            {
+                break;
+            }
+            std::string innerName = AbilityName(r);
+            if (!innerName.empty())
+            {
+                const uint8_t* at = reinterpret_cast<const uint8_t*>(q) + inner;
+                KYBER_LOG(Info, "[GCAbil] " << where << " off=0x" << std::hex << off << "->0x" << inner << " " << innerName
+                                            << " ctx=" << Hex(at - 0x10, 0x40));
+            }
+        }
+    }
+}
+
+void DumpAbilities(ServerPlayer* player)
+{
+    if (player == nullptr)
+    {
+        return;
+    }
+    KYBER_LOG(Info, "[GCAbil] dump " << player->m_name << " player=0x" << std::hex << reinterpret_cast<uintptr_t>(player) << " abilityExtent=0x"
+                                     << reinterpret_cast<uintptr_t>(player->GetWSServerPlayerAbilityExtent()) << " character=0x"
+                                     << reinterpret_cast<uintptr_t>(player->GetCharacterEntity()));
+    ScanForAbilities("extent", reinterpret_cast<const uint8_t*>(player->GetWSServerPlayerAbilityExtent()), 0x200, 0x400);
+}
+
+void ApplyOfflineInventoryFromEnv()
+{
+    const char* list = std::getenv("GC_OFFLINE_INVENTORY");
+    if (list == nullptr)
+    {
+        return;
+    }
+    DataContainer* settings = g_program->GetSettingsObject<DataContainer>("WSOfflineInventory");
+    const FieldInfoData* enabled = Valid(settings) ? FindField(settings->getType(), "Enabled") : nullptr;
+    const FieldInfoData* items = Valid(settings) ? FindField(settings->getType(), "InventoryItems") : nullptr;
+    if (enabled == nullptr || items == nullptr)
+    {
+        KYBER_LOG(Info, "[GCInv] apply failed: WSOfflineInventory fields not found");
+        return;
+    }
+    std::vector<char*> names;
+    std::stringstream stream(list);
+    std::string name;
+    while (std::getline(stream, name, ','))
+    {
+        if (!name.empty())
+        {
+            names.push_back(StringUtils::CopyWithArena(name));
+        }
+    }
+    uint8_t* base = reinterpret_cast<uint8_t*>(settings);
+    reinterpret_cast<FBArray<char*>*>(base + items->fieldOffset)->cloneFromVec(names);
+    *reinterpret_cast<bool*>(base + enabled->fieldOffset) = true;
+    KYBER_LOG(Info, "[GCInv] applied WSOfflineInventory Enabled=1 count=" << names.size());
+}
+
 void ProbeFromEnv()
 {
+    AbilityWatch::Poll();
+    static std::once_flag inventoryOnce;
+    if (ProbeEnabled())
+    {
+        std::call_once(inventoryOnce, []() {
+            ProbeInventory("WSOfflineInventory");
+            ProbeInventory("WSEventOfflineInventory");
+        });
+    }
     const char* list = std::getenv("GC_UNLOCK_PROBE_KITS");
     if (!ProbeEnabled() || list == nullptr)
     {

@@ -8,6 +8,7 @@
 #include <Core/Program.h>
 #include <Entity/KyberSettings.h>
 #include <Misc/ReinforcementLimits.h>
+#include <Misc/StarCardLevels.h>
 
 #include <cstring>
 
@@ -197,6 +198,12 @@ void ChatSystemProcessIncomingMessageHk(ChatChannel channel, const char* message
             KYBER_LOG(Info, "[Chat] GCR1 parsed");
             return;
         }
+    }
+
+    // Star card level lines from the server plugin are consumed here and never shown in chat
+    if (message != nullptr && channel == ChatChannel_Admin && StarCardLevels::ParseLine(message))
+    {
+        return;
     }
 
     // Reverse channel switch done in ChatSystemProcessAndSendChatMessageHk so it displays properly

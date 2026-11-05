@@ -53,8 +53,11 @@ public:
     // Drops a cost-row kit when that entity is destroyed.
     static void UnregisterCostKit(uintptr_t entityAddress);
 
-    // Matches pending settings ids to GCR1 kits and cards; safe to call often.
+    // Matches pending settings ids to GCR1 kits and cards; only does work after an input changed, so it is safe to call every frame.
     static void ResolvePending();
+
+    // Marks the pending association stale (GCR1 kits changed).
+    static void InvalidatePending();
 
     // Records a spawn-card widget in creation order for index pairing.
     static void RegisterCardWidget(uintptr_t entityAddress, uintptr_t bus, uintptr_t parentBus, const std::string& typeName);

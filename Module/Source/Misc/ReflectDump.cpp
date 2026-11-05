@@ -121,6 +121,32 @@ const FieldInfoData* FindField(const TypeInfo* type, const char* name)
     return nullptr;
 }
 
+std::vector<const FieldInfoData*> AllFields(const TypeInfo* type)
+{
+    std::vector<const FieldInfoData*> out;
+    for (int depth = 0; type != nullptr && depth < kMaxSuperDepth; depth++)
+    {
+        const FieldInfoData* fields = nullptr;
+        int count = 0;
+        DeclaredFields(type, fields, count);
+        for (int i = 0; fields != nullptr && i < count; i++)
+        {
+            out.push_back(&fields[i]);
+        }
+        if (type->getBasicType() != kTypeCode_Class)
+        {
+            break;
+        }
+        const TypeInfo* next = reinterpret_cast<const TypeInfo*>(reinterpret_cast<const ClassInfoData*>(type->typeInfoData)->superClass);
+        if (next == type)
+        {
+            break;
+        }
+        type = next;
+    }
+    return out;
+}
+
 bool ReadU32(const void* object, const TypeInfo* type, const char* name, uint32_t& out)
 {
     const FieldInfoData* field = FindField(type, name);

@@ -13,6 +13,8 @@
 #include <Misc/ReinforcementLimits.h>
 #include <Misc/ReinforcementText.h>
 #include <Misc/ReinforcementWidgets.h>
+#include <Misc/StarCardLevels.h>
+#include <Misc/TickStats.h>
 
 #include <optional>
 
@@ -164,6 +166,7 @@ __int64 ClientStateChangeHk(__int64 inst, ClientState currentClientState, Client
         ReinforcementLimits::Clear();
         ReinforcementText::ClearUi();
         ReinforcementWidgets::Clear();
+        StarCardLevels::Clear();
 
         // g_program->m_console->UnregisterCommands();
         g_program->m_allowInteraction = false;
@@ -347,32 +350,43 @@ void** OnlineManagerConnectHk(void* inst, const SocketAddr& address)
 __int64 ClientUpdatePassPreFrameHk(void* inst, const UpdateParameters& params)
 {
     static const auto trampoline = HookManager::Call(ClientUpdatePassPreFrameHk);
+    TickStats::Frame(false);
+    uint64_t t = TickStats::Now();
     __int64 result = trampoline(inst, params);
+    t = TickStats::Add(false, TickStats::Section_Game, t);
 
     if (g_program->m_entityManager != nullptr)
     {
         g_program->m_entityManager->UpdateEntities(Realm_Client, params);
     }
+    t = TickStats::Add(false, TickStats::Section_Entities, t);
 
     for (const auto& listener : g_program->m_client->m_updatePassListeners)
     {
         listener->Call(ClientUpdatePass_PreFrame);
     }
+    t = TickStats::Add(false, TickStats::Section_Listeners, t);
 
     g_threadExecutor->Process(GameThread_Client);
+    t = TickStats::Add(false, TickStats::Section_Executor, t);
     g_program->m_client->m_eventManager->ProcessEventQueue();
+    t = TickStats::Add(false, TickStats::Section_Events, t);
 
     if (!g_program->m_server->IsRunning())
     {
         g_program->GetAPI()->Update();
     }
+    t = TickStats::Add(false, TickStats::Section_Api, t);
 
     if (g_program->m_scriptManager != nullptr)
     {
         g_program->m_scriptManager->GetEventManager().Fire("Client:UpdatePre", params.simulationDeltaTime.toSecondsAsFloat());
     }
+    t = TickStats::Add(false, TickStats::Section_Lua, t);
 
+    StarCardLevels::Poll();
     GenericUpdateManager::Get().Call(UpdateType_Client_PreFrame, params);
+    TickStats::Add(false, TickStats::Section_Generic, t);
     return result;
 }
 

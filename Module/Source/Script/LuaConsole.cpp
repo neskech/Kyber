@@ -4,6 +4,7 @@
 
 #include <Core/Program.h>
 #include <Misc/ReinforcementLimits.h>
+#include <Misc/StarCardLevels.h>
 
 namespace Kyber::Script
 {
@@ -133,6 +134,13 @@ static int ConsolePushReinforcementsFunc(lua_State* L)
     return 0;
 }
 
+// Console.SetStarCardLevels(team1, team2) sets this process's star card level per team (0-based, -1 = game default).
+static int ConsoleSetStarCardLevelsFunc(lua_State* L)
+{
+    StarCardLevels::SetTeamLevels(static_cast<int>(luaL_optinteger(L, 1, -1)), static_cast<int>(luaL_optinteger(L, 2, -1)));
+    return 0;
+}
+
 static int ConsoleGetSettingsFunc(lua_State* L)
 {
     if (!lua_isstring(L, 1))
@@ -161,6 +169,7 @@ static const luaL_Reg s_consoleTableFuncs[] = {
     { "Execute", ConsoleExecuteFunc }, 
     { "GetSettings", ConsoleGetSettingsFunc },
     { "PushReinforcements", ConsolePushReinforcementsFunc },
+    { "SetStarCardLevels", ConsoleSetStarCardLevelsFunc },
     { NULL, NULL } 
 };
 // clang-format on

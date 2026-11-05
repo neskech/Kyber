@@ -9,6 +9,7 @@
 #include <Core/Program.h>
 #include <SDK/Funcs.h>
 #include <SDK/Fb/WS.h>
+#include <Misc/UnlockCatalog.h>
 
 #include <vector>
 
@@ -341,6 +342,13 @@ static int ServerPlayerSetRevokedUnlocks(lua_State* L)
         lua_pop(L, 1);
     }
     ServerPlayerSetRevokedUnlocks(player, indices);
+    return 0;
+}
+
+// player:DumpAbilities() logs the player's active ability memory for level research.
+static int ServerPlayerDumpAbilities(lua_State* L)
+{
+    UnlockCatalog::DumpAbilities(LuaPlayerManager::GetServerPlayer(L, 1));
     return 0;
 }
 
@@ -813,6 +821,11 @@ static int ServerPlayerIndex(lua_State* L)
     else if (key == "SetRevokedUnlocks")
     {
         lua_pushcfunction(L, ServerPlayerSetRevokedUnlocks);
+        return 1;
+    }
+    else if (key == "DumpAbilities")
+    {
+        lua_pushcfunction(L, ServerPlayerDumpAbilities);
         return 1;
     }
     else if (key == "Kick")

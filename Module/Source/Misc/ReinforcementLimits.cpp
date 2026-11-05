@@ -126,6 +126,7 @@ bool ReinforcementLimits::ParseLine(const std::string& line)
             s_store[entry.kit] = entry;
         }
     }
+    ReinforcementText::InvalidatePending();
     ReinforcementText::ResolvePending();
     return true;
 }

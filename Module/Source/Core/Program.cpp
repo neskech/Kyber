@@ -10,6 +10,7 @@
 #include <Misc/ChatFilter.h>
 #include <Misc/ReinforcementText.h>
 #include <Misc/ReinforcementWidgets.h>
+#include <Misc/UnlockCatalog.h>
 #include <Core/Memory.h>
 #include <Core/Sentry.h>
 #include <Hook/HookManager.h>
@@ -547,6 +548,7 @@ bool MainLoopInitHk(MainLoop* inst)
     {
         g_program->m_settingsManager->ApplySettings();
         g_program->m_server->OnSettingsRegistered();
+        UnlockCatalog::ApplyOfflineInventoryFromEnv();
     }
 
     return result;

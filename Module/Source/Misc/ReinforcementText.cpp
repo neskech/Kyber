@@ -73,6 +73,7 @@ struct PendingText
 std::vector<PendingCost> s_pendingCosts;     // Cost rows in create order (never dropped for empty GCR1).
 std::vector<PendingWidget> s_pendingWidgets; // Wrapped widgets in create order.
 std::vector<PendingText> s_pendingTexts;     // TextElement rows for count writes.
+bool s_associateDirty = true;                // Pending rows or GCR1 changed since the last AssociateLocked.
 int s_nextCostIndex = 0;                     // Card-like cost sequence.
 int s_nextWidgetIndex = 0;                   // List-item widget sequence.
 int s_dumpSeq = 0;                           // [GCDump] create sequence.
@@ -237,6 +238,7 @@ void ReinforcementText::RegisterCostKit(uintptr_t entityAddress, uintptr_t bus, 
     }
     const std::string resolved = MatchTokenToKit(kit);
     std::lock_guard<std::mutex> lock(s_mutex);
+    s_associateDirty = true;
     s_costByEntity[entityAddress] = CostBus{ bus, parentBus, resolved.empty() ? kit : resolved };
     for (PendingCost& row : s_pendingCosts)
     {
@@ -272,6 +274,7 @@ void ReinforcementText::RegisterCostKit(uintptr_t entityAddress, uintptr_t bus, 
 void ReinforcementText::UnregisterCostKit(uintptr_t entityAddress)
 {
     std::lock_guard<std::mutex> lock(s_mutex);
+    s_associateDirty = true;
     s_costByEntity.erase(entityAddress);
     s_pendingCosts.erase(std::remove_if(s_pendingCosts.begin(), s_pendingCosts.end(),
                                         [entityAddress](const PendingCost& row) { return row.entity == entityAddress; }),
@@ -451,6 +454,7 @@ void ReinforcementText::ClearUi()
         s_pendingWidgets.clear();
         s_pendingTexts.clear();
         s_tokenToWidget.clear();
+        s_associateDirty = true;
         s_nextCostIndex = 0;
         s_nextWidgetIndex = 0;
         s_dumpSeq = 0;
@@ -673,16 +677,22 @@ static void AssociateLocked()
                                                 << " widgets=" << all.size() << " pendingCosts=" << s_pendingCosts.size());
     }
 
-    auto pairCostWidget = [](PendingCost& cost, PendingWidget& widget) {
+    std::vector<const PendingText*> liveTexts;
+    for (const PendingText& text : s_pendingTexts)
+    {
+        if (EntityAlive(text.entity))
+        {
+            liveTexts.push_back(&text);
+        }
+    }
+
+    auto pairCostWidget = [&liveTexts](PendingCost& cost, PendingWidget& widget) {
         widget.kit = cost.kit;
         s_bindings[widget.entity] = cost.kit;
         s_tokenToWidget[NormalizeId(cost.token)] = widget.entity;
-        for (const PendingText& text : s_pendingTexts)
+        for (const PendingText* textRow : liveTexts)
         {
-            if (!EntityAlive(text.entity))
-            {
-                continue;
-            }
+            const PendingText& text = *textRow;
             const bool sameBus = text.bus == widget.bus || text.bus == widget.parentBus || text.parentBus == widget.bus;
             if (sameBus)
             {
@@ -727,7 +737,18 @@ static void AssociateLocked()
 void ReinforcementText::ResolvePending()
 {
     std::lock_guard<std::mutex> lock(s_mutex);
+    if (!s_associateDirty)
+    {
+        return;
+    }
+    s_associateDirty = false;
     AssociateLocked();
+}
+
+void ReinforcementText::InvalidatePending()
+{
+    std::lock_guard<std::mutex> lock(s_mutex);
+    s_associateDirty = true;
 }
 
 void ReinforcementText::RegisterCardWidget(uintptr_t entityAddress, uintptr_t bus, uintptr_t parentBus, const std::string& typeName)
@@ -737,6 +758,7 @@ void ReinforcementText::RegisterCardWidget(uintptr_t entityAddress, uintptr_t bu
         return;
     }
     std::lock_guard<std::mutex> lock(s_mutex);
+    s_associateDirty = true;
     for (PendingWidget& widget : s_pendingWidgets)
     {
         if (widget.entity == entityAddress)
@@ -761,6 +783,7 @@ void ReinforcementText::RegisterCardWidget(uintptr_t entityAddress, uintptr_t bu
 void ReinforcementText::UnregisterCardWidget(uintptr_t entityAddress)
 {
     std::lock_guard<std::mutex> lock(s_mutex);
+    s_associateDirty = true;
     s_pendingWidgets.erase(std::remove_if(s_pendingWidgets.begin(), s_pendingWidgets.end(),
                                           [entityAddress](const PendingWidget& row) { return row.entity == entityAddress; }),
                            s_pendingWidgets.end());
@@ -773,6 +796,7 @@ void ReinforcementText::RegisterTextSlot(uintptr_t entityAddress, uintptr_t bus,
         return;
     }
     std::lock_guard<std::mutex> lock(s_mutex);
+    s_associateDirty = true;
     for (PendingText& text : s_pendingTexts)
     {
         if (text.entity == entityAddress)
@@ -793,6 +817,7 @@ void ReinforcementText::NoteTextSelection(uintptr_t entityAddress, uintptr_t bus
     }
     const std::string kit = MatchTokenToKit(text);
     std::lock_guard<std::mutex> lock(s_mutex);
+    s_associateDirty = true;
     if (!kit.empty())
     {
         s_bindings[entityAddress] = kit;

@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace Kyber
 {
@@ -29,6 +30,9 @@ const char* TypeName(const TypeInfo* type);
 
 // Finds a field by name on a class (walking superclasses) or value type.
 const FieldInfoData* FindField(const TypeInfo* type, const char* name);
+
+// Every field of a class (with superclasses) or value type.
+std::vector<const FieldInfoData*> AllFields(const TypeInfo* type);
 
 // Reads a 32-bit field by name; false when missing or unreadable.
 bool ReadU32(const void* object, const TypeInfo* type, const char* name, uint32_t& out);

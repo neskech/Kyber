@@ -34,5 +34,11 @@ void Probe(DataContainer* kit, const std::string& path);
 
 // Probes every kit path in GC_UNLOCK_PROBE_KITS (comma list) that has loaded and was not probed yet.
 void ProbeFromEnv();
+
+// Polls the ability watch probe, then logs ability asset pointers found in the player's ability extent, with nearby bytes.
+void DumpAbilities(ServerPlayer* player);
+
+// Enables WSOfflineInventory with the item aliases in GC_OFFLINE_INVENTORY (comma list); no-op when unset.
+void ApplyOfflineInventoryFromEnv();
 } // namespace UnlockCatalog
 } // namespace Kyber
