@@ -32,6 +32,9 @@ public:
     // True when GC_TEXT_DISCOVERY=1.
     static bool DiscoveryEnabled();
 
+    // True when GC_TEXT_HOOKS=1 or discovery is on: UI text wrappers, loc rewrites, and label writers run.
+    static bool LabelHooksEnabled();
+
     // Label field to write; GC_TEXT_FIELD or "Text".
     static const std::string& TextField();
 
@@ -41,7 +44,7 @@ public:
     // True when GC_TEXT_MODE=localizedId (default is string).
     static bool LocalizedIdMode();
 
-    // True when label writers should run (always, once a Text field exists).
+    // True when label hooks are on and a Text field to write exists.
     static bool WriterEnabled();
 
     // True when at least one per-frame writer is registered.

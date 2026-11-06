@@ -4,6 +4,7 @@
 
 #include <Base/Log.h>
 #include <Hook/HookManager.h>
+#include <Misc/EntityCreateTrace.h>
 #include <Misc/ReflectDump.h>
 #include <Utilities/PlatformUtils.h>
 #include <Utilities/StringUtils.h>
@@ -345,6 +346,7 @@ void PrintDumpToLog(EXCEPTION_POINTERS* exceptionInfo)
     PrintStackWords(exceptionInfo->ContextRecord, 16);
     KYBER_LOG(Info, "");
     PrintStackTrace(exceptionInfo->ContextRecord);
+    EntityCreateTrace::LogRecent();
     WriteOwnedMiniDump(exceptionInfo);
 
     KYBER_LOG(Info, "----------- EXCEPTION DUMP END -----------");

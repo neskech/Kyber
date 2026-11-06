@@ -1079,9 +1079,13 @@ KyberEntityBase* CreateWrapper(EntityManager* entityManager, NativeEntity* entit
     return new W(entityManager, entity, reinterpret_cast<D*>(data));
 }
 
-// Registers the spawn-card entity wrappers for every run.
+// Registers the spawn-card UI entity wrappers only with GC_TEXT_HOOKS=1 or discovery; they run on every UI text change.
 bool RegisterGcTextCreators()
 {
+    if (!ReinforcementText::LabelHooksEnabled())
+    {
+        return false;
+    }
     static EntityStaticRegistrar textElement("TextElementData", CreateWrapper<GcTextElementEntity, TextElementData>, false);
     static EntityStaticRegistrar unitCost("BattlepointUnitCostEntityData", CreateWrapper<GcUnitCostEntity, BattlepointUnitCostEntityData>, false);
     static EntityStaticRegistrar heroCost("BattlepointHeroCostEntityData", CreateWrapper<GcHeroCostEntity, BattlepointHeroCostEntityData>, false);

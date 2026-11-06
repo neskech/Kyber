@@ -190,6 +190,12 @@ bool ReinforcementText::DiscoveryEnabled()
     return enabled;
 }
 
+bool ReinforcementText::LabelHooksEnabled()
+{
+    static const bool enabled = EnvString("GC_TEXT_HOOKS") == "1" || DiscoveryEnabled();
+    return enabled;
+}
+
 const std::string& ReinforcementText::TextField()
 {
     static const std::string field = []() {
@@ -216,7 +222,7 @@ bool ReinforcementText::LocalizedIdMode()
 
 bool ReinforcementText::WriterEnabled()
 {
-    return !TextField().empty();
+    return LabelHooksEnabled() && !TextField().empty();
 }
 
 bool ReinforcementText::HasWriters()
@@ -1070,7 +1076,7 @@ void ReinforcementText::LogComponentCreated(uintptr_t entityAddress, const char*
 
 const char* ReinforcementText::RewriteLocalized(const char* id, const char* result)
 {
-    if (id == nullptr || id[0] == '\0' || result == nullptr || result[0] == '\0' || ReinforcementLimits::IsEmpty())
+    if (!LabelHooksEnabled() || id == nullptr || id[0] == '\0' || result == nullptr || result[0] == '\0' || ReinforcementLimits::IsEmpty())
     {
         return nullptr;
     }
@@ -1139,7 +1145,7 @@ std::string ReinforcementText::KitForLocalizedHash(int32_t hash)
 
 const char* ReinforcementText::LookupLocalized(const char* id)
 {
-    if (id == nullptr || id[0] == '\0')
+    if (!LabelHooksEnabled() || id == nullptr || id[0] == '\0')
     {
         return nullptr;
     }

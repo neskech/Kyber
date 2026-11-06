@@ -15,6 +15,7 @@
 #include <Utilities/PlatformUtils.h>
 #include <SDK/Funcs.h>
 #include <Network/StreamManager.h>
+#include <Misc/EntityCreateTrace.h>
 
 #include <EASTL/fixed_map.h>
 
@@ -715,7 +716,7 @@ void* EntityFactoryInternalCreateEntityHk(void* params, void* dc)
     const char* name = "?";
     if (data != nullptr && data->getType() != nullptr)
         name = data->getType()->getName();
-    KYBER_LOG(Info, "[EntityCreate] " << name);
+    EntityCreateTrace::Record(name);
 
     if (g_program->m_entityManager != nullptr)
     {
