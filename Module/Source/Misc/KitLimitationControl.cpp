@@ -38,6 +38,7 @@ class KitLimitationEntityData : public DataContainer
 {};
 
 constexpr int kMaxChangeLogs = 600;   // Property/event lines per process.
+constexpr int32_t kBrokenPrice = 50000; // Native Price at/above this is treated as unset (EraLock maps).
 
 std::recursive_mutex s_mutex;
 std::atomic<int> s_changeLogs{ 0 };
@@ -176,6 +177,26 @@ bool LockStage()
     return LockMode() != "max";
 }
 
+// Stock battle-point cost used when native Price is broken (heroes / specials / vehicles).
+int32_t StockPrice(int group)
+{
+    if (group == 0)
+        return 4000;
+    if (group == 1)
+        return 1000;
+    return 800;
+}
+
+// Stock MaxCount when the host map leaves an EraLock card at 0 (heroes / specials / vehicles).
+int32_t StockMax(int group)
+{
+    if (group == 0)
+        return 1;
+    if (group == 1)
+        return 6;
+    return 4;
+}
+
 class GcKitLimitationEntity;
 std::vector<GcKitLimitationEntity*> s_entities;
 
@@ -246,7 +267,7 @@ public:
         return m_server;
     }
 
-    // Writes MaxCount=0 on depleted kits and restores the original value when a kit is refilled.
+    // Writes MaxCount=0 on depleted kits, force-enables the rest, and restores a refill.
     void Apply(const std::unordered_map<uint32_t, std::string>& depleted)
     {
         if (!m_valuesLogged && std::chrono::steady_clock::now() - m_created > std::chrono::seconds(5))
@@ -283,6 +304,10 @@ public:
             {
                 Unlock(slot, locked->second);
                 m_locked.erase(locked);
+            }
+            if (!wantLock)
+            {
+                EnsureAvailable(slot);
             }
         }
     }
@@ -338,6 +363,45 @@ private:
         const bool okStage = !LockStage() || (saved.stage >= 0 && WriteBoolInput(slot.stageHash, saved.stage == 1));
         KYBER_LOG(Info, "[GCKitLim] unlock type=" << m_entityType << " kit=0x" << std::hex << slot.kitId << std::dec << " max=" << saved.max
                                                   << " write=" << okMax << " stage=" << saved.stage << " write=" << okStage);
+    }
+
+    // Turns on EraLock cards the host map still treats as the wrong era (stage, MaxCount, garbage Price).
+    void EnsureAvailable(const LimitationSlot& slot)
+    {
+        if (LockStage())
+        {
+            bool stage = false;
+            if (ReadBoolInput(slot.stageHash, stage) && !stage)
+            {
+                KYBER_LOG(Info, "[GCKitLim] enable type=" << m_entityType << " kit=0x" << std::hex << slot.kitId << std::dec
+                                                          << " write=" << WriteBoolInput(slot.stageHash, true));
+            }
+        }
+        if (LockMax())
+        {
+            int32_t max = 0;
+            if (ReadInt(slot.maxHash, max) && max <= 0)
+            {
+                int32_t want = StockMax(slot.group);
+                auto tracked = s_tracked.find(slot.kitId);
+                if (tracked != s_tracked.end())
+                    want = (std::max)(1, tracked->second.start);
+                KYBER_LOG(Info, "[GCKitLim] max type=" << m_entityType << " kit=0x" << std::hex << slot.kitId << std::dec << " 0->" << want
+                                                       << " write=" << WriteInt(slot.maxHash, want));
+            }
+        }
+        if (FreeKits() || PriceIsCount())
+        {
+            return;
+        }
+        int32_t price = 0;
+        if (!ReadInt(slot.priceHash, price) || price < kBrokenPrice)
+        {
+            return;
+        }
+        const int32_t want = StockPrice(slot.group);
+        KYBER_LOG(Info, "[GCKitLim] clampPrice type=" << m_entityType << " kit=0x" << std::hex << slot.kitId << std::dec << " " << price << "->"
+                                                      << want << " write=" << WriteInt(slot.priceHash, want));
     }
 
 public:
@@ -452,12 +516,14 @@ private:
     // Writes a Boolean into the cache feeding an input property hash and fires its listeners.
     bool WriteBoolInput(int32_t hash, bool value)
     {
-        PropertyWriterBase writer;
-        writer.m_cache = InputCache(hash);
-        if (writer.m_cache == nullptr)
+        CacheData* cache = InputCache(hash);
+        void* packed = nullptr;
+        if (cache == nullptr || !SafeRead(&cache->value, &packed, sizeof(packed)) || packed == nullptr)
         {
             return false;
         }
+        PropertyWriterBase writer;
+        writer.m_cache = cache;
         PropertyWriterBase_set(&writer, &value, true);
         bool check = !value;
         return ReadBoolInput(hash, check) && check == value;
@@ -466,12 +532,14 @@ private:
     // Writes an Int32 into the cache feeding an input property hash and fires its listeners.
     bool WriteInt(int32_t hash, int32_t value)
     {
-        PropertyWriterBase writer;
-        writer.m_cache = InputCache(hash);
-        if (writer.m_cache == nullptr)
+        CacheData* cache = InputCache(hash);
+        void* packed = nullptr;
+        if (cache == nullptr || !SafeRead(&cache->value, &packed, sizeof(packed)) || packed == nullptr)
         {
             return false;
         }
+        PropertyWriterBase writer;
+        writer.m_cache = cache;
         PropertyWriterBase_set(&writer, &value, true);
         int32_t check = -1;
         return ReadInt(hash, check) && check == value;
