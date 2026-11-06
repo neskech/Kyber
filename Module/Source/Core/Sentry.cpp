@@ -4,13 +4,18 @@
 
 #include <Base/Log.h>
 #include <Hook/HookManager.h>
+#include <Misc/ReflectDump.h>
 #include <Utilities/PlatformUtils.h>
 #include <Utilities/StringUtils.h>
 
 #include <sentry.h>
 
-#include <errhandlingapi.h>
+#include <windows.h>
 #include <DbgHelp.h>
+
+#include <cstring>
+#include <iomanip>
+#include <sstream>
 
 namespace Kyber
 {
@@ -46,8 +51,109 @@ const char* ExceptionCodeToString(DWORD code)
     }
 }
 
+// Copies readable process bytes; used to dump the decrypted opcode at RIP.
+static bool SafeReadBytes(const void* src, void* dst, SIZE_T n)
+{
+    if (src == nullptr || dst == nullptr || n == 0)
+    {
+        return false;
+    }
+    MEMORY_BASIC_INFORMATION info = {};
+    if (VirtualQuery(src, &info, sizeof(info)) == 0 || info.State != MEM_COMMIT)
+    {
+        return false;
+    }
+    const DWORD protect = info.Protect & 0xff;
+    if (protect == PAGE_NOACCESS || protect == PAGE_EXECUTE)
+    {
+        return false;
+    }
+    __try
+    {
+        memcpy(dst, src, n);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+// Logs a hex dump of live bytes at addr (decrypted by the time we crash).
+static void PrintLiveBytes(const char* label, const void* addr, SIZE_T n)
+{
+    unsigned char buf[64] = {};
+    if (n > sizeof(buf))
+    {
+        n = sizeof(buf);
+    }
+    if (!SafeReadBytes(addr, buf, n))
+    {
+        KYBER_LOG(Info, label << " unreadable at 0x" << std::hex << reinterpret_cast<uintptr_t>(addr));
+        return;
+    }
+    std::ostringstream oss;
+    oss << label << " @0x" << std::hex << reinterpret_cast<uintptr_t>(addr) << ":";
+    for (SIZE_T i = 0; i < n; ++i)
+    {
+        oss << " " << std::setw(2) << std::setfill('0') << static_cast<int>(buf[i]);
+    }
+    KYBER_LOG(Info, oss.str());
+}
+
+// Logs qwords on the crash stack.
+static void PrintStackWords(CONTEXT* ctx, int count)
+{
+#ifdef _M_X64
+    const uintptr_t rsp = static_cast<uintptr_t>(ctx->Rsp);
+#else
+    const uintptr_t rsp = static_cast<uintptr_t>(ctx->Esp);
+#endif
+    for (int i = 0; i < count; ++i)
+    {
+        uintptr_t word = 0;
+        const void* slot = reinterpret_cast<const void*>(rsp + static_cast<uintptr_t>(i) * sizeof(uintptr_t));
+        if (!SafeReadBytes(slot, &word, sizeof(word)))
+        {
+            KYBER_LOG(Info, "stack[" << i << "] unreadable");
+            break;
+        }
+        KYBER_LOG(Info, "stack[" << i << "] 0x" << std::hex << word);
+    }
+}
+
+// Writes a small minidump next to the Kyber log.
+static void WriteOwnedMiniDump(EXCEPTION_POINTERS* exceptionInfo)
+{
+    wchar_t appdata[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH) == 0)
+    {
+        KYBER_LOG(Info, "minidump skipped: no APPDATA");
+        return;
+    }
+    wchar_t path[MAX_PATH] = {};
+    swprintf_s(path, L"%s\\ArmchairDevelopers\\Kyber\\Logs\\luke-crash.dmp", appdata);
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        KYBER_LOG(Info, "minidump create failed");
+        return;
+    }
+    MINIDUMP_EXCEPTION_INFORMATION mei = {};
+    mei.ThreadId = GetCurrentThreadId();
+    mei.ExceptionPointers = exceptionInfo;
+    mei.ClientPointers = FALSE;
+    const BOOL ok = MiniDumpWriteDump(
+        GetCurrentProcess(), GetCurrentProcessId(), file,
+        static_cast<MINIDUMP_TYPE>(MiniDumpNormal | MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo),
+        &mei, nullptr, nullptr);
+    CloseHandle(file);
+    KYBER_LOG(Info, (ok ? "minidump wrote luke-crash.dmp" : "minidump write failed"));
+}
+
 void PrintStackTrace(CONTEXT* ctx)
 {
+    CONTEXT walk = *ctx;
     HANDLE process = GetCurrentProcess();
     HANDLE thread = GetCurrentThread();
 
@@ -59,19 +165,19 @@ void PrintStackTrace(CONTEXT* ctx)
 
 #ifdef _M_X64
     machineType = IMAGE_FILE_MACHINE_AMD64;
-    frame.AddrPC.Offset = ctx->Rip;
+    frame.AddrPC.Offset = walk.Rip;
     frame.AddrPC.Mode = AddrModeFlat;
-    frame.AddrFrame.Offset = ctx->Rbp;
+    frame.AddrFrame.Offset = walk.Rbp;
     frame.AddrFrame.Mode = AddrModeFlat;
-    frame.AddrStack.Offset = ctx->Rsp;
+    frame.AddrStack.Offset = walk.Rsp;
     frame.AddrStack.Mode = AddrModeFlat;
 #elif _M_IX86
     machineType = IMAGE_FILE_MACHINE_I386;
-    frame.AddrPC.Offset = ctx->Eip;
+    frame.AddrPC.Offset = walk.Eip;
     frame.AddrPC.Mode = AddrModeFlat;
-    frame.AddrFrame.Offset = ctx->Ebp;
+    frame.AddrFrame.Offset = walk.Ebp;
     frame.AddrFrame.Mode = AddrModeFlat;
-    frame.AddrStack.Offset = ctx->Esp;
+    frame.AddrStack.Offset = walk.Esp;
     frame.AddrStack.Mode = AddrModeFlat;
 #else
     std::cout << "Unsupported architecture\n";
@@ -79,7 +185,8 @@ void PrintStackTrace(CONTEXT* ctx)
 #endif
 
     int frameNum = 0;
-    while (StackWalk64(machineType, process, thread, &frame, ctx, NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL))
+    while (frameNum < 16 &&
+           StackWalk64(machineType, process, thread, &frame, &walk, NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL))
     {
         std::ostringstream oss;
 
@@ -164,6 +271,51 @@ void PrintRegisters(CONTEXT* ctx)
 #endif
 }
 
+// Logs TypeInfo name and the +0x20 pointer on a live Frostbite object.
+static void PrintObjectType(const char* label, uintptr_t obj)
+{
+    if (obj == 0)
+    {
+        KYBER_LOG(Info, label << " null");
+        return;
+    }
+    uintptr_t vtable = 0;
+    uintptr_t typeAddr = 0;
+    uintptr_t field20 = 0;
+    SafeReadBytes(reinterpret_cast<const void*>(obj), &vtable, sizeof(vtable));
+    SafeReadBytes(reinterpret_cast<const void*>(obj + sizeof(void*)), &typeAddr, sizeof(typeAddr));
+    SafeReadBytes(reinterpret_cast<const void*>(obj + 0x20), &field20, sizeof(field20));
+    const TypeInfo* type = reinterpret_cast<const TypeInfo*>(typeAddr);
+    const TypeInfo* asType = reinterpret_cast<const TypeInfo*>(obj);
+    if (!Reflect::ReadableType(type) && Reflect::ReadableType(asType))
+    {
+        KYBER_LOG(Info, label << " typeinfo=0x" << std::hex << obj << " name=" << Reflect::TypeName(asType));
+        return;
+    }
+    const char* name = Reflect::ReadableType(type) ? Reflect::TypeName(type) : "?";
+    KYBER_LOG(Info, label << " obj=0x" << std::hex << obj << " vtbl=0x" << vtable << " type=0x" << typeAddr
+                          << " name=" << name << " +20=0x" << field20);
+    if (!Reflect::ReadableType(type))
+    {
+        return;
+    }
+    if (field20 != 0)
+    {
+        uintptr_t childType = 0;
+        SafeReadBytes(reinterpret_cast<const void*>(field20 + sizeof(void*)), &childType, sizeof(childType));
+        const TypeInfo* ct = reinterpret_cast<const TypeInfo*>(childType);
+        KYBER_LOG(Info, label << "+20 name=" << (Reflect::ReadableType(ct) ? Reflect::TypeName(ct) : "?"));
+    }
+    const FieldInfoData* field = Reflect::FindField(type, "Name");
+    if (field != nullptr)
+    {
+        const char* namePtr = nullptr;
+        SafeReadBytes(reinterpret_cast<const void*>(obj + field->fieldOffset), &namePtr, sizeof(namePtr));
+        KYBER_LOG(Info, label << " assetName=" << Reflect::ReadCString(namePtr));
+    }
+}
+
+// Logs crash registers, live opcode bytes, stack words, then a short walk.
 void PrintDumpToLog(EXCEPTION_POINTERS* exceptionInfo)
 {
     DWORD errorCode = exceptionInfo->ExceptionRecord->ExceptionCode;
@@ -172,10 +324,28 @@ void PrintDumpToLog(EXCEPTION_POINTERS* exceptionInfo)
     KYBER_LOG(Info, "Exception Code: 0x" << std::hex << errorCode << " (" << ExceptionCodeToString(errorCode) << ")");
     KYBER_LOG(Info, "Exception Flags: 0x" << std::hex << exceptionInfo->ExceptionRecord->ExceptionFlags);
     KYBER_LOG(Info, "Exception Address: 0x" << std::hex << exceptionInfo->ExceptionRecord->ExceptionAddress);
-    KYBER_LOG(Info, "");
-    PrintStackTrace(exceptionInfo->ContextRecord);
+    if (errorCode == EXCEPTION_ACCESS_VIOLATION && exceptionInfo->ExceptionRecord->NumberParameters >= 2)
+    {
+        const ULONG_PTR kind = exceptionInfo->ExceptionRecord->ExceptionInformation[0];
+        const ULONG_PTR fault = exceptionInfo->ExceptionRecord->ExceptionInformation[1];
+        const char* verb = kind == 0 ? "read" : kind == 1 ? "write" : "exec";
+        KYBER_LOG(Info, "Access " << verb << " of 0x" << std::hex << fault);
+    }
     KYBER_LOG(Info, "");
     PrintRegisters(exceptionInfo->ContextRecord);
+#ifdef _M_X64
+    PrintObjectType("rbx", exceptionInfo->ContextRecord->Rbx);
+    PrintObjectType("rdx", exceptionInfo->ContextRecord->Rdx);
+    PrintObjectType("rsi", exceptionInfo->ContextRecord->Rsi);
+    PrintObjectType("rdi", exceptionInfo->ContextRecord->Rdi);
+    PrintObjectType("r12", exceptionInfo->ContextRecord->R12);
+    PrintObjectType("r14", exceptionInfo->ContextRecord->R14);
+#endif
+    PrintLiveBytes("code", exceptionInfo->ExceptionRecord->ExceptionAddress, 64);
+    PrintStackWords(exceptionInfo->ContextRecord, 16);
+    KYBER_LOG(Info, "");
+    PrintStackTrace(exceptionInfo->ContextRecord);
+    WriteOwnedMiniDump(exceptionInfo);
 
     KYBER_LOG(Info, "----------- EXCEPTION DUMP END -----------");
 }

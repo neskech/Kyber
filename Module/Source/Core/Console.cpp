@@ -712,7 +712,10 @@ void* EntityFactoryInternalCreateEntityHk(void* params, void* dc)
 {
     static auto trampoline = HookManager::Call(EntityFactoryInternalCreateEntityHk);
     DataContainer* data = *(DataContainer**)((__int64)params + 0x110);
-    const char* name = data->getType()->getName();
+    const char* name = "?";
+    if (data != nullptr && data->getType() != nullptr)
+        name = data->getType()->getName();
+    KYBER_LOG(Info, "[EntityCreate] " << name);
 
     if (g_program->m_entityManager != nullptr)
     {
