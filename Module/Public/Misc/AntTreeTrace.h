@@ -1,4 +1,4 @@
-// Hooks ANT id/get, optional 0xBBD fallback, and AntStateAsset bank construction.
+// ANT id/get hooks plus hardware-BP capture of the bank constructor.
 #pragma once
 
 #include <cstdint>
@@ -7,10 +7,13 @@ namespace Kyber
 {
 namespace AntTreeTrace
 {
-// Installs id/get hooks when GC_ANT_TREE_LOG=1 or GC_ANT_FALLBACK=1.
+// Arms VEH+DR BPs when GC_ANT_SECOND_BANK=1; id/get when log/fallback.
 void Install();
 
-// Counts and unique ids seen this run (crash-handler summary).
+// Re-arms DRx and retries the second AC4AE0 from a game thread.
+void Poll();
+
+// Counts seen this run (crash-handler summary).
 void LogSummary();
 } // namespace AntTreeTrace
 } // namespace Kyber

@@ -7,6 +7,7 @@
 #include <Base/Logo.h>
 #include <Base/Version.h>
 #include <Core/DebugHooks.h>
+#include <Misc/AntTreeTrace.h>
 #include <Misc/ChatFilter.h>
 #include <Misc/ReinforcementText.h>
 #include <Misc/ReinforcementWidgets.h>
@@ -351,6 +352,7 @@ TL_DECLARE_FUNC(0x146C5EF40, __int64, __unkServerGhosts, __int64*);
 void MessageManagerDispatchMessageHk(void* inst, Message* message)
 {
     static const auto trampoline = HookManager::Call(MessageManagerDispatchMessageHk);
+    AntTreeTrace::Poll();
     if (message == nullptr)
     {
         trampoline(inst, message);
@@ -830,6 +832,7 @@ void Program::Initialize()
 
     StreamManagerKyberEvent::InitializeHooks();
     ChatFilter::InitializeHooks();
+    AntTreeTrace::Install();
 
     m_server->Initialize();
     m_client->Initialize();
