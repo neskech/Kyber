@@ -15,6 +15,7 @@
 #include <Utilities/PlatformUtils.h>
 #include <SDK/Funcs.h>
 #include <Network/StreamManager.h>
+#include <Misc/AntTreeTrace.h>
 #include <Misc/EntityCreateTrace.h>
 
 #include <EASTL/fixed_map.h>
@@ -713,10 +714,7 @@ void* EntityFactoryInternalCreateEntityHk(void* params, void* dc)
 {
     static auto trampoline = HookManager::Call(EntityFactoryInternalCreateEntityHk);
     DataContainer* data = *(DataContainer**)((__int64)params + 0x110);
-    const char* name = "?";
-    if (data != nullptr && data->getType() != nullptr)
-        name = data->getType()->getName();
-    EntityCreateTrace::Record(name);
+    EntityCreateTrace::Record(data, params);
 
     if (g_program->m_entityManager != nullptr)
     {
@@ -737,6 +735,15 @@ void* EntityFactoryInternalCreateEntityHk(void* params, void* dc)
     return entity;
 }
 
+// Logs which GP/VUR ids the spawn screen applies.
+void SetActiveKitHk(ServerPlayerExtent* inst, uint32_t gpId, uint32_t unk0, uint32_t vurId, uint32_t skinInfoId)
+{
+    static auto trampoline = HookManager::Call(SetActiveKitHk);
+    KYBER_LOG(Info, "[SetActiveKit] gpId=0x" << std::hex << gpId << " unk0=0x" << unk0 << " vurId=0x" << vurId
+                                             << " skin=0x" << skinInfoId);
+    trampoline(inst, gpId, unk0, vurId, skinInfoId);
+}
+
 void RegisterConsoleCommand(StaticConsoleMethodPtr_t func, const char* name, const char* description)
 {
     ConsoleMethod* method = new ConsoleMethod{ func, name, 0, description };
@@ -747,9 +754,11 @@ Console::Console()
 {
     KYBER_LOG(Info, "[Console] Initializing Console Commands");
     HookManager::CreateHook(HOOK_OFFSET(0x1474DA700), EntityFactoryInternalCreateEntityHk);
+    // SetActiveKit hook AVs Sequel during WaitingForLevel (Kyber lock btr rcx=0). Kamino already logged gpId/vurId.
     //HookManager::CreateHook(HOOK_OFFSET(0x1473295D0), OnCreateHelperHk);
     //HookManager::CreateHook(HOOK_OFFSET(0x140196CF0), SendStatProgressMessageCtorHk);
     HookManager::CreateHook(HOOK_OFFSET(0x1401A8980), ConsoleRegistryExecuteConsoleCommandHk);
+    AntTreeTrace::Install();
     Hook::ApplyQueuedActions();
 
     // MemoryUtils::Nop(HOOK_OFFSET(0x14543CFB2), 4);

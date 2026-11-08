@@ -54,6 +54,7 @@ cc_binary(
         "//ThirdParty/sentry",
         "//ThirdParty/lua",
         "//ThirdParty/safetyhook",
+        "//ThirdParty/zydis",
         "@grpc//:grpc++",
         "//ThirdParty/ToolLib",
         "//ThirdParty/zip",

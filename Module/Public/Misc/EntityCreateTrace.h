@@ -2,14 +2,16 @@
 
 #pragma once
 
-// Recent entity-create type names for crash dumps; per-create logging only with GC_ENTITY_CREATE_LOG=1.
+class DataContainer;
+
+// Recent entity-create type+asset names for crash dumps; per-create logging only with GC_ENTITY_CREATE_LOG=1.
 
 namespace Kyber
 {
 namespace EntityCreateTrace
 {
-// Remembers one created entity's data type name and logs it when GC_ENTITY_CREATE_LOG=1.
-void Record(const char* typeName);
+// Remembers one created entity's TypeInfo name, Name, and Identifier.
+void Record(DataContainer* data, void* factoryParams = nullptr);
 
 // Logs the most recent creates, oldest first; called from the crash handler.
 void LogRecent();

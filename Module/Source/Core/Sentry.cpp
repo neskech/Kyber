@@ -4,6 +4,8 @@
 
 #include <Base/Log.h>
 #include <Hook/HookManager.h>
+#include <Misc/AntTreeTrace.h>
+#include <Misc/CrashDisasm.h>
 #include <Misc/EntityCreateTrace.h>
 #include <Misc/ReflectDump.h>
 #include <Utilities/PlatformUtils.h>
@@ -334,6 +336,7 @@ void PrintDumpToLog(EXCEPTION_POINTERS* exceptionInfo)
     }
     KYBER_LOG(Info, "");
     PrintRegisters(exceptionInfo->ContextRecord);
+    PrintCrashDisasm(exceptionInfo);
 #ifdef _M_X64
     PrintObjectType("rbx", exceptionInfo->ContextRecord->Rbx);
     PrintObjectType("rdx", exceptionInfo->ContextRecord->Rdx);
@@ -347,6 +350,7 @@ void PrintDumpToLog(EXCEPTION_POINTERS* exceptionInfo)
     KYBER_LOG(Info, "");
     PrintStackTrace(exceptionInfo->ContextRecord);
     EntityCreateTrace::LogRecent();
+    AntTreeTrace::LogSummary();
     WriteOwnedMiniDump(exceptionInfo);
 
     KYBER_LOG(Info, "----------- EXCEPTION DUMP END -----------");
